@@ -173,3 +173,33 @@ Un sistema que:
 - Reduce errores estructurales.
 - Aumenta estabilidad y supervivencia del trader.
 - Prioriza claridad y disciplina sobre actividad.
+
+---
+
+## Implementación actual (resumen)
+Esta sección documenta **cómo se implementó** el State Engine respetando el texto original.
+
+### Fuentes de datos (MT5)
+- Se añadió un conector dedicado para obtener OHLCV H1 desde MetaTrader 5, evitando fuentes externas.
+- El flujo de entrenamiento usa exclusivamente este conector para descargar datos del símbolo y rango de fechas solicitados.
+
+### Features PA-first (H1, W=24)
+- Las features core se calculan sobre H1 con ventana fija W=24 y normalización por ATR.
+- Se incluyen `D`, `ER`, `A`, `Range_W`, `CloseLocation`, `ReentryCount`, `InsideBarsRatio`, `SwingCounts`.
+- Las pendientes (`EfficiencySlope`, `RangeSlope`) están disponibles como opcionales si se habilitan.
+
+### Auto-etiquetado
+- Se implementaron las reglas de etiquetado BALANCE/TRANSICIÓN/TENDENCIA exactamente con los umbrales descritos.
+- El etiquetado ocurre offline a partir de las features `ER`, `D`, `A`.
+
+### Modelo principal (StateEngine)
+- Se implementó un wrapper de LightGBM multiclass para entrenar y predecir probabilidades de estado.
+- La salida son probabilidades `P(balance)`, `P(transición)`, `P(tendencia)` en cada H1.
+
+### Gating determinista (`ALLOW_*`)
+- Se implementó una capa de reglas deterministas para convertir probabilidades en ALLOWs.
+- Ejemplos soportados: `ALLOW_trend_pullback`, `ALLOW_balance_fade`, `ALLOW_transition_failure`.
+
+### Pipeline y script de entrenamiento
+- Se agregó un pipeline mínimo que construye features + labels y entrena el modelo.
+- El script de entrenamiento recibe `symbol`, `start`, `end`, entrena, guarda el modelo y calcula `ALLOW_*`.
