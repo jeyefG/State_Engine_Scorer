@@ -11,6 +11,11 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]  # State_Engine/
+sys.path.insert(0, str(ROOT))
+
 from state_engine import (
     FeatureConfig,
     GatingPolicy,
