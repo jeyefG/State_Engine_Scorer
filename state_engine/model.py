@@ -52,6 +52,26 @@ class StateEngineModel:
             columns=["P(balance)", "P(transition)", "P(trend)"],
             index=features.index,
         )
+    
+    def predict_outputs(self, features: pd.DataFrame) -> pd.DataFrame:
+       """Predict state, margin, and probabilities for reporting."""
+       probas = self.predict_proba(features)
+       top1 = probas.max(axis=1)
+       top2 = probas.apply(lambda row: row.nlargest(2).iloc[-1], axis=1)
+       margin = top1 - top2
+       state_hat = probas.idxmax(axis=1).map(
+           {"P(balance)": StateLabels.BALANCE, "P(transition)": StateLabels.TRANSITION, "P(trend)": StateLabels.TREND}
+       )
+       return pd.DataFrame(
+           {
+               "state_hat": state_hat,
+               "margin": margin,
+               "P(balance)": probas["P(balance)"],
+               "P(transition)": probas["P(transition)"],
+               "P(trend)": probas["P(trend)"],
+           },
+           index=features.index,
+       )
 
     def predict_state(self, features: pd.DataFrame) -> pd.Series:
         """Predict most likely state label."""
