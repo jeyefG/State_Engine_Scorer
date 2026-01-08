@@ -20,6 +20,7 @@ class FeatureConfig:
     recent_window: int = 8
     enable_slopes: bool = False
     include_er_netmove: bool = False
+    allow_label_proxies: bool = False    
 
 
 class FeatureEngineer:
@@ -118,6 +119,10 @@ class FeatureEngineer:
     def training_features(self, features: pd.DataFrame) -> pd.DataFrame:
         """Return features aligned with the configured training set."""
         names = self.feature_names()
+        if not self.config.allow_label_proxies:
+            # Avoid definition leakage: labeler uses ER/NetMove to build y.
+            names = [n for n in names if n not in ("ER", "NetMove")]
+
         missing = [name for name in names if name not in features.columns]
         if missing:
             raise ValueError(f"Missing expected features: {missing}")
@@ -199,3 +204,4 @@ class FeatureEngineer:
 
 
 __all__ = ["FeatureConfig", "FeatureEngineer"]
+
