@@ -75,11 +75,10 @@ Para cada timestamp `t`:
    `Range_W = (H_W - L_W) / ATR_W`
 
 5) **Posición del cierre en el rango (dirección-neutral)**  
-   `CloseLocation = (C_t - L_W) / (H_W - L_W)` en [0,1]  
-   Si `H_W == L_W`, fijar `CloseLocation = 0.5` (neutral) o marcar NaN y descartar.
+   `CloseLocation = (C_t - L_W) / (H_W - L_W)` en [0,1]
 
 6) **Ruptura de rango (magnitud, no dirección)**  
-   `BreakMag = |C_t - clamp(C_t, L_W, H_W)| / ATR_N`  
+   `BreakMag = max(0, |C_t - clamp(C_t, L_W, H_W)|) / ATR_N`  
    Es 0 si el cierre está dentro del rango W.
 
 7) **ReentryCount (definición exacta)**  
@@ -99,8 +98,7 @@ Para cada timestamp `t`:
    `InsideBarsRatio = (# inside bars en N) / N`
 
 9) **SwingCount (dirección-neutral)**  
-   Se usa pivote simple y solo cuenta giros, no dirección.  
-   Se computa **solo hasta t-1** usando pivots confirmados (evitar leakage).
+   Se usa pivote simple y solo cuenta giros, no dirección:
    - Pivot high en `i` si `H_i > H_{i-1}` y `H_i > H_{i+1}`
    - Pivot low en `i` si `L_i < L_{i-1}` y `L_i < L_{i+1}`
 
@@ -116,12 +114,6 @@ Para cada timestamp `t`:
 El etiquetado inicial existe para arrancar. No se optimiza por accuracy.
 
 **Regla crítica:** el modelo no puede usar exactamente el mismo set mínimo que define el bootstrap como features core (evitar colapso reglas↔ML).
-
-**Separación obligatoria (elige una opción y respétala):**
-- **Opción A (recomendada):** bootstrap usa (`ER`, `NetMove`) + **1** confirmación secundaria (p. ej. `ReentryCount` **o** `InsideBarsRatio` **o** `BreakMag`).  
-  Features core **no** incluyen `ER`/`NetMove`, pero sí pueden incluir el resto.
-- **Opción B:** bootstrap usa un set **distinto** al set de features (p. ej. solo `ER`, `NetMove`, `Range_W`).  
-  Las micro-features quedan **solo** para el modelo.
 
 ### Bootstrap rules (positivas para cada clase)
 Umbrales iniciales (ajustables por validación de PnL/DD):
@@ -142,11 +134,6 @@ Umbrales iniciales (ajustables por validación de PnL/DD):
 - (a) `BreakMag ≥ 0.25` y `ReentryCount ≥ 1` (ruptura + reingreso), o
 - (b) `NetMove ≥ 1.0` y `ER` en [0.22, 0.38] (desplazamiento sin eficiencia), o
 - (c) `RangeSlope > 0` y `InsideBarsRatio` cae fuerte vs pasado (expansión post compresión).
-
-**Subtags internos (no son clases nuevas):**
-- `transition_type = FAILURE` para (a)  
-- `transition_type = DRIVE` para (b)  
-Uso: análisis y guardrails (no para entrenar si se mantiene simple).
 
 Si hay conflicto de reglas:
 - Prioridad: **TRANSICIÓN > TENDENCIA > BALANCE**  
@@ -200,7 +187,6 @@ Solo si mejora PnL/DD OOS:
 Regla general:
 - El gating se basa en `state_hat`, `margin` y guardrails simples (volatilidad/compresión).
 - No se usa `P(state) ≥ umbral` salvo calibración validada.
-- Los umbrales de `margin` **no son fijos**: se calibran por percentiles OOS (p. ej. p60) o targeting de tasa de “no trade”.
 
 Ejemplos:
 - `ALLOW_trend_pullback = 1` si `state_hat == TENDENCIA` y `margin ≥ 0.15`
