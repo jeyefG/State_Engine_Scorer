@@ -171,7 +171,7 @@ Notas:
   - `state_hat` (clase predicha)
   - `margin = P(top1) - P(top2)`
   - `probas` (opcional para reporting)
-- **Calibración**: si se quiere usar umbrales sobre `P()`, se debe aplicar calibración (Platt/Isotonic) y validar estabilidad out-of-sample.
+- **Calibración**: si se quiere usar umbrales sobre `P(state)`, se debe aplicar calibración (Platt/Isotonic) y validar estabilidad out-of-sample.
 - **Por defecto**, el gating usa `state_hat` + `margin`.
 
 ### Modelos auxiliares (máximo 1, por defecto 0)
@@ -185,7 +185,10 @@ Solo si mejora PnL/DD OOS:
 `ALLOW` **no se entrena**. Es una capa lógica.
 
 Regla general:
-- El gating se basa en `state_hat`, `margin` y guardrails simples (volatilidad/compresión).
+- El gating se basa en `state_hat`, `margin` y guardrails simples.
+- Los valores de margin se fijan por:
+   - percentiles OOS del margin, o
+   - targeting explícito de tasa de "no trade" 
 - No se usa `P(state) ≥ umbral` salvo calibración validada.
 
 Ejemplos:
@@ -259,30 +262,103 @@ Un sistema que:
 ---
 
 ## Implementación actual (resumen)
-Esta sección documenta **cómo se implementó** el State Engine respetando el texto original.
+Esta sección documenta **cómo se implementó** el State Engine respetando estrictamente las definiciones de este documento.
+No introduce lógica adicional ni heurísticas implícitas.
 
 ### Fuentes de datos (MT5)
-- Se añadió un conector dedicado para obtener OHLCV H1 desde MetaTrader 5, evitando fuentes externas.
-- El flujo de entrenamiento usa exclusivamente este conector para descargar datos del símbolo y rango de fechas solicitados.
+- Se utiliza un conector dedicado (MT5Connector) para obtener OHLCV en **H1** desde MetaTrader 5.
+- No se usan fuentes externas ni feeds alternativos.
+- El rango temporal de entrenamiento se define explícitamente por symbol, start, end.
+- El manejo de timezone, resampling y NaN se realiza antes de cualquier cálculo de features.
 
-### Features PA-first (H1, W=24)
-- Las features core se calculan sobre H1 con ventana fija W=24 y normalización según ATR_W/ATR_N.
-- Se incluyen `Path`, `Range_W`, `CloseLocation`, `BreakMag`, `ReentryCount`, `InsideBarsRatio`, `SwingCount`.
-- Se agrega `ATR_N / ATR_W` como ratio de cambio de volatilidad.
-- Las pendientes (`ERSlope`, `RangeSlope`) están disponibles como opcionales si se habilitan.
+### Cálculo de variables PA-first (H1)
+- Todas las variables se calculan **exclusivamente con información ≤ t**.
+- Se usan ventanas fijas:
+   - W = 24 H1 para contexto.
+   - N = 8 H1 para comportamiento reciente.
+- La normalización distingue explícitamente:
+   - métricas de contexto → ATR_W
+   - métricas recientes / ruptura → ATR_N
+- Variables implementadas:
+   - Path
+   - Range_W
+   - CloseLocation
+      - Si H_W == L_W, se asigna CloseLocation = 0.5.
+    - BreakMag
+    - ReentryCount
+    - InsideBarsRatio
+    - SwingCount
+       - Calculado solo con pivots confirmados hasta t-1 (no se usa información futura).
+    - ATR_N / ATR_W
+    - Pendientes (ERSlope, RangeSlope) disponibles como opcionales.
+
+No se calculan ni almacenan indicadores clásicos ni niveles externos.
 
 ### Auto-etiquetado (bootstrap)
-- Se implementaron reglas iniciales de bootstrap con prioridad conservadora para TRANSICIÓN.
-- El etiquetado ocurre offline y no se usa como feature.
+- El bootstrap se ejecuta **offline**, previo al entrenamiento.
+- Se basa únicamente en las reglas explícitas definidas en este documento.
+- Las etiquetas bootstrap no representan verdad de mercado, solo un punto de partida.
+- Las variables usadas para definir el bootstrap no se reutilizan automáticamente como features core del modelo.
+- En caso de conflicto entre reglas:
+   - Se aplica la prioridad conservadora:
+   - **TRANSICIÓN > TENDENCIA > BALANCE**.
+
+Las etiquetas bootstrap **no se guardan como features** y no están disponibles durante inferencia.
 
 ### Modelo principal (StateEngine)
-- Se implementó un wrapper de LightGBM multiclass para entrenar y predecir `state_hat`, `margin` y probabilidades.
-- Las probabilidades son opcionales para reporting; el gating usa `state_hat + margin` por defecto.
+- Se entrena un **LightGBM multiclass** con tres clases:
+   - BALANCE
+   - TRANSICIÓN
+   - TENDENCIA
+- El modelo recibe únicamente el set de features definido en la sección correspondiente.
+- Salidas del modelo:
+   - state_hat: clase predicha (argmax).
+   - margin = P(top1) − P(top2) como medida de confianza relativa.
+   - Probabilidades completas (probas) solo para análisis y reporting.
+
+Por defecto:
+   - **No se asume calibración de probabilidades**.
+   - El sistema no depende de umbrales directos sobre P(state).
 
 ### Gating determinista (`ALLOW_*`)
-- Se implementó una capa de reglas deterministas para convertir `state_hat` y `margin` en ALLOWs.
-- Ejemplos soportados: `ALLOW_trend_pullback`, `ALLOW_balance_fade`, `ALLOW_transition_failure`.
+- El gating es una capa lógica separada, no entrenada.
+- Las decisiones ALLOW_* se derivan de:
+   - state_hat
+   - margin
+   - guardrails simples (ruptura, reingreso, compresión/expansión).
 
-### Pipeline y script de entrenamiento
-- Se agregó un pipeline mínimo que construye features + labels y entrena el modelo.
-- El script de entrenamiento recibe `symbol`, `start`, `end`, entrena, guarda el modelo y calcula `ALLOW_*`.
+Ejemplos implementados:
+   - ALLOW_trend_pullback
+   - ALLOW_balance_fade
+   - ALLOW_transition_failure
+
+Si state_hat == TRANSICIÓN:
+   - El sistema **prohíbe swing direccional por defecto**, independientemente del margin.
+
+### Pipeline de entrenamiento
+- El pipeline sigue estrictamente este orden:
+   1) Descarga de datos (MT5).
+   2) Limpieza básica y alineación temporal.
+   3) Cálculo de variables PA-first.
+   4) Generación de etiquetas bootstrap (offline).
+   5) Entrenamiento del modelo StateEngine.
+   6) Persistencia del modelo entrenado.
+
+No se optimiza por accuracy o F1.
+La evaluación se realiza **posteriormente**, condicionando PnL y drawdown por estado y ALLOW_*.
+
+### Inferencia
+- En inferencia online:
+   - Se recalculan únicamente las variables PA-first.
+   - El modelo produce state_hat y margin.
+   - El gating determina explícitamente qué familias de setups están habilitadas.
+
+- El sistema puede devolver **“no operar”** como resultado explícito y válido.
+
+### Nota final de implementación
+
+La implementación está diseñada para:
+   - ser **auditable**,
+   - evitar leakage temporal,
+   - mantener separación clara entre percepción (ML) y decisión (reglas),
+   - y permitir ajustes de parámetros **sin reescribir la lógica del sistema**.
