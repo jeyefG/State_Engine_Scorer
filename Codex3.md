@@ -1,106 +1,136 @@
-Eres Codex. Objetivo: extender el watchdog H1 existente para que, cuando haya ALLOW_* activo en la última H1 cerrada, muestre (opcionalmente) un resumen de oportunidades del Event Scorer (M5) como TELEMETRÍA (no señal). No romper arquitectura: el watchdog NO ejecuta trades, NO genera señales, NO crea órdenes. Solo reporta contexto H1 + top eventos M5 con edge_score.
+Eres Codex. Objetivo: extender el watchdog H1 existente para que, cuando haya ALLOW_* activo en la ÚLTIMA H1 CERRADA, muestre un resumen de oportunidades del Event Scorer (M5) como TELEMETRÍA (no señal). El watchdog NO ejecuta trades, NO genera señales, NO crea órdenes. Solo reporta contexto H1 + ranking de eventos M5 con edge_score. El Event Scorer se ejecuta únicamente bajo condición de ALLOW activo.
 
 ================================================================
 SEMÁNTICA INNEGOCIABLE
 ================================================================
-- Watchdog es H1-first: su gatillo principal es “nueva vela H1 cerrada”.
-- El Event Scorer es M5-only: output edge_score (información, no acción).
-- Prohibido convertir edge_score en BUY/SELL o “señal”.
-- Prohibido usar H1 en formación: usar cutoff = server_now.floor("h") y ohlcv_h1 < cutoff.
-- Prohibido leakage: M5 evaluado debe ser <= cutoff.
-- El scorer se evalúa SOLO si allow_any=True en la última H1 cerrada (reduce ruido).
+- El watchdog es H1-first: su gatillo principal es la detección de una nueva vela H1 CERRADA.
+- El Event Scorer es M5-only y es PARTE OBLIGATORIA del output del watchdog
+  CUANDO existe al menos un ALLOW_* activo en la ÚLTIMA H1 CERRADA.
+- Si NO hay ALLOW_* activo en la última H1 cerrada, el Event Scorer NO se ejecuta y NO se muestra.
+- El Event Scorer nunca corre fuera de un ALLOW activo.
+- El output del Event Scorer es edge_score (telemetría), NO señal.
+- Está prohibido convertir edge_score en BUY/SELL, trigger automático o acción ejecutable.
+- Está prohibido usar H1 en formación o M5 posterior al cutoff (anti-leakage).
 
 ================================================================
 CAMBIO FUNCIONAL
 ================================================================
-Cuando el watchdog detecta una nueva H1 cerrada y allow_any=True en el último índice:
-- además del summary H1 actual (state_hat/margin/rules fired),
-- imprimir un bloque adicional: “Event Scorer (M5) snapshot” que contenga:
-  - ventana M5 evaluada (ej: last N minutos hasta cutoff)
-  - conteo de eventos por familia detectados en esa ventana
-  - top K eventos por edge_score con:
-    timestamp_event, family_id, side, edge_score
-    (opcional) entry_proxy_time (next M5 open) y entry_proxy_price
-- Si no hay eventos en ventana: reportar “no events detected”
-- Si no hay scorer disponible: reportar “scorer not available” (sin error fatal)
+Cuando el watchdog detecta una nueva H1 cerrada (last_idx):
 
-NO generar files (signals.csv/trades.csv) desde watchdog.
-NO backtesting desde watchdog.
+- Si allow_any == False en last_idx:
+    - Renderizar SOLO el summary H1:
+        estado (state_hat), margin y rules fired.
+    - NO ejecutar lógica M5.
+    - NO cargar ni evaluar el Event Scorer.
 
-================================================================
-ARGUMENTOS CLI NUEVOS (watchdog)
-================================================================
-Agregar flags (todos opcionales):
-- --enable-scorer (bool) default False
-- --scorer-dir PATH (default: args.model_dir o PROJECT_ROOT/models)
-- --scorer-template STR (default "{symbol}_event_scorer.pkl" o el nombre real usado en repo)
-- --m5-lookback-min INT (default 180)
-- --top-events INT (default 5)
-- --min-edge-score FLOAT (default None; si se setea, filtrar eventos bajo ese score en el display)
-
-Mantener compatibilidad: si no se usa --enable-scorer, watchdog se comporta igual que hoy.
+- Si allow_any == True en last_idx:
+    - Renderizar el summary H1.
+    - Ejecutar de forma OBLIGATORIA un snapshot M5 del Event Scorer.
+    - Mostrar un ranking de eventos M5 con edge_score.
 
 ================================================================
-INTEGRACIÓN TÉCNICA (USAR MÓDULOS EXISTENTES DEL REPO)
+ARGUMENTOS CLI (watchdog)
 ================================================================
-Reutilizar los módulos ya implementados:
-- state_engine.events: detect_events(...) para obtener events_df
-- state_engine.scoring: EventScorer.load(...) y predict_proba(...) para edge_score
-- bridge H1→M5: usar la misma lógica causal del repo (shift(1)+merge_asof(backward)).
-  Si ya existe helper, úsalo. Si no existe, implementar localmente dentro del watchdog de forma simple y auditable.
+Agregar los siguientes flags (todos opcionales):
+
+- --scorer-dir PATH
+    Directorio donde se encuentran los modelos del Event Scorer
+    (default: args.model_dir o PROJECT_ROOT/models)
+
+- --scorer-template STR
+    Plantilla del nombre del scorer
+    (default: "{symbol}_event_scorer.pkl")
+
+- --m5-lookback-min INT
+    Ventana M5 a evaluar hacia atrás desde el cutoff
+    (default: 180 minutos)
+
+- --top-events INT
+    Número máximo de eventos M5 a mostrar en el ranking
+    (default: 5)
+
+- --min-edge-score FLOAT
+    Umbral mínimo para mostrar eventos en el ranking
+    (default: None → no filtra)
+
+NO existe flag --enable-scorer.
+La ejecución del Event Scorer es condicional al ALLOW H1, no opcional.
+
+================================================================
+INTEGRACIÓN TÉCNICA (USAR MÓDULOS EXISTENTES)
+================================================================
+Reutilizar módulos del repo siempre que existan:
+
+- state_engine.events.detect_events(...) → generar events_df (candidatos M5)
+- state_engine.scoring.EventScorer.load(...) y predict_proba(...) → edge_score
+- Puente H1→M5:
+    Aplicar SIEMPRE el último H1 cerrado a M5 usando
+    shift(1) + merge_asof(backward).
 
 Data requirements:
-- Descargar M5 para la ventana: [cutoff - m5_lookback_min, cutoff]
-- Descargar H1 lookback ya existente (para state/gating).
-- Construir contexto H1 (outputs+gating) y aplicarlo a M5 (último H1 cerrado) antes de detectar eventos.
-
-Regla: eventos M5 deben detectar solo cuando ALLOW_* correspondiente está activo en M5 (por forward-fill del allow desde H1).
+- Descargar H1 con el lookback ya existente para state/gating.
+- Descargar M5 en el rango:
+    [cutoff − m5_lookback_min, cutoff]
+- Aplicar contexto H1 (outputs + gating) a M5 ANTES de detectar eventos.
+- Detectar eventos M5 SOLO cuando el ALLOW_* correspondiente está activo
+  (forward-fill del allow desde H1).
 
 ================================================================
-UI / LOGGING (TEXTO O RICH)
+UI / LOGGING (OPERATIVO)
 ================================================================
-Si Rich está disponible, agregar sección debajo del summary actual:
+Bajo el summary H1 existente, agregar:
 
 === Event Scorer (M5) Snapshot ===
-Window: 2025-.. .. -> cutoff
-Events: total=.. | by_family={...}
-Top events:
-1) ts=... family=E_... side=LONG edge=0.71 entry_proxy=... price=...
+Window: <start> → <cutoff>
+Events detected: total=<n> | by_family={<family>: <count>, ...}
+
+Top events (sorted by edge_score desc):
+1) ts=<event_ts> | family=<E_*> | side=<LONG/SHORT> | edge=<0.xx>
+   entry_proxy_time=<next_m5_open> | entry_proxy_price=<price>
 ...
 
-Si no hay Rich, imprimir lo mismo en texto plano.
+Si no hay eventos en la ventana:
+- Mostrar: “no events detected in M5 window”.
 
-IMPORTANTE:
-- No imprimir métricas de entrenamiento (accuracy/f1) en modo operación, salvo que ya exista y sea requerido.
-- Mantener el output enfocado: estado/margin/rules + snapshot scorer.
+Si el scorer no está disponible:
+- Mostrar: “scorer not available – cannot rank opportunities”.
+
+No imprimir métricas de entrenamiento (accuracy, F1) en modo operación.
+El foco del output es: contexto H1 + ranking M5.
 
 ================================================================
 MANEJO DE ERRORES
 ================================================================
-- Si falla descarga M5: warning y continuar.
-- Si scorer file no existe: warning “scorer not available” y continuar.
-- Si detect_events no encuentra eventos: imprimir “no events detected”.
-- Nunca crash del watchdog por scorer.
+- Si falla la descarga M5 → warning y continuar.
+- Si el archivo del scorer no existe o falla el load → warning y continuar.
+- Nunca hacer crash del watchdog por el Event Scorer.
+- Si allow_any=True y el scorer no está disponible:
+    - Mostrar summary H1.
+    - Mostrar bloque Event Scorer con mensaje de indisponibilidad.
 
 ================================================================
 LISTA DE TAREAS CONCRETAS
 ================================================================
-1) Modificar parse_args() para agregar flags.
-2) Implementar load_event_scorer(symbol, scorer_dir, scorer_template) con safe_symbol.
-3) Implementar fetch_m5(symbol, start, end) usando MT5Connector (crear método si no existe; si ya existe, usarlo).
-4) Implementar bridge H1→M5:
-   - tomar outputs H1 + gating H1
+1) Extender parse_args() con los flags del scorer.
+2) Implementar load_event_scorer(symbol, scorer_dir, scorer_template)
+   usando safe_symbol.
+3) Implementar fetch_m5(symbol, start, end) con MT5Connector
+   (reusar método existente si ya está).
+4) Implementar puente H1→M5:
+   - outputs H1 + gating H1
    - shift(1)
-   - merge_asof hacia index M5
-5) En loop por símbolo:
-   - si allow_any del último H1 es True y --enable-scorer:
-       - correr snapshot M5 y renderizar
-6) Mantener comportamiento actual si --enable-scorer=False.
+   - merge_asof hacia índice M5
+5) En el loop por símbolo:
+   - Si allow_any == True en la ÚLTIMA H1 CERRADA:
+       - ejecutar snapshot M5 del Event Scorer y renderizar
+   - Si allow_any == False:
+       - NO ejecutar scorer
+6) Mantener intacto el pipeline de training y backtesting.
 
 ================================================================
 ENTREGABLE
 ================================================================
-- Watchdog actualizado con scorer snapshot.
-- Sin cambios al pipeline de training/backtest.
+- Watchdog actualizado con snapshot del Event Scorer condicionado por ALLOW.
+- Sin generación de señales ni órdenes.
 - Sin romper scripts existentes.
 Implementa ahora.
