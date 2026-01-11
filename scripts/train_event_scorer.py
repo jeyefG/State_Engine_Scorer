@@ -32,7 +32,6 @@ from state_engine.model import StateEngineModel
 from state_engine.mt5_connector import MT5Connector
 from state_engine.labels import StateLabels
 from state_engine.scoring import EventScorer, EventScorerBundle, EventScorerConfig, FeatureBuilder
-from state_engine.transition_shadow import print_transition_shadow_report
 
 
 def parse_args() -> argparse.Namespace:
@@ -157,6 +156,22 @@ def _state_label(value: int | float) -> str:
         return "UNKNOWN"
 
 
+def _format_state_mix(counts: pd.Series, state_order: list[str]) -> list[str]:
+    total = counts.sum()
+    lines = []
+    for state in state_order:
+        count = int(counts.get(state, 0))
+        pct = (count / total * 100.0) if total else 0.0
+        lines.append(f"{state}={count} ({pct:.2f}%)")
+    return lines
+
+
+def _format_metric(value: float) -> str:
+    if pd.isna(value):
+        return "nan"
+    return f"{value:.4f}"
+
+
 def _meta_policy_mask(
     events_df: pd.DataFrame,
     allow_cols: list[str],
@@ -234,6 +249,27 @@ def main() -> None:
     df_m5_ctx = df_m5_ctx.dropna(subset=["state_hat_H1", "margin_H1"])
     logger.info("Rows after dropna ctx: M5_ctx=%s", len(df_m5_ctx))
 
+    state_labels_before = df_m5_ctx["state_hat_H1"].map(_state_label)
+    state_counts_before = state_labels_before.value_counts()
+    print("[STATE MIX | BEFORE FILTER]")
+    for line in _format_state_mix(state_counts_before, ["BALANCE", "TREND", "TRANSITION"]):
+        print(line)
+
+    rows_before = len(df_m5_ctx)
+    df_m5_ctx = df_m5_ctx.loc[df_m5_ctx["state_hat_H1"] != StateLabels.TRANSITION].copy()
+    rows_after = len(df_m5_ctx)
+    kept_pct = (rows_after / rows_before * 100.0) if rows_before else 0.0
+
+    state_labels_after = df_m5_ctx["state_hat_H1"].map(_state_label)
+    state_counts_after = state_labels_after.value_counts()
+    print("\n[STATE MIX | AFTER FILTER]")
+    for line in _format_state_mix(state_counts_after, ["BALANCE", "TREND"]):
+        print(line)
+    print("\n[FILTER IMPACT]")
+    print(f"rows_before={rows_before}")
+    print(f"rows_after={rows_after}")
+    print(f"kept_pct={kept_pct:.2f}%")
+
     events = detect_events(df_m5_ctx)
     if events.empty:
         logger.warning("No events detected; exiting.")
@@ -284,12 +320,6 @@ def main() -> None:
     logger.info("Labeled events by family:\n%s", events["family_id"].value_counts().to_string())
 
     events_all = events.copy()
-    print_transition_shadow_report(
-        events_all,
-        state_col="state_hat_H1",
-        margin_col="margin_H1",
-        pnl_col="r_outcome",
-    )
     allow_cols = [col for col in events_all.columns if col.startswith("ALLOW_")]
     if not allow_cols:
         logger.warning("No ALLOW_* columns found on events; meta policy will be empty.")
@@ -311,6 +341,19 @@ def main() -> None:
     events_all["regime_id"] = (
         state_label.astype(str) + "|" + margin_bin_label.fillna("mNA") + "|" + allow_family
     )
+
+    print("\n[BASELINE BY STATE | POST FILTER]")
+    for state_name in ["BALANCE", "TREND"]:
+        state_mask = events_all["state_label"] == state_name
+        state_events = events_all.loc[state_mask]
+        trades = len(state_events)
+        winrate = float(state_events["label"].mean()) if trades else float("nan")
+        avg_pnl = float(state_events["r_outcome"].mean()) if trades else float("nan")
+        total_pnl = float(state_events["r_outcome"].sum()) if trades else float("nan")
+        print(
+            f"{state_name}: trades={trades}, winrate={_format_metric(winrate)}, "
+            f"avg_pnl={_format_metric(avg_pnl)}, total_pnl={_format_metric(total_pnl)}"
+        )
 
     meta_policy_on = args.meta_policy == "on"
     meta_mask = _meta_policy_mask(events_all, allow_cols, args.meta_margin_min, args.meta_margin_max)
@@ -387,6 +430,10 @@ def main() -> None:
     r_calib_no_meta = dataset_no_meta["r_calib"]
     fam_calib_no_meta = dataset_no_meta["fam_calib"]
     regime_calib_no_meta = dataset_no_meta["regime_calib"]
+
+    transition_events_present = bool((events_all["state_label"] == "TRANSITION").any())
+    transition_samples_train = int((events_for_training.loc[X_train.index, "state_label"] == "TRANSITION").sum())
+    transition_samples_calib = int((events_for_training.loc[X_calib.index, "state_label"] == "TRANSITION").sum())
 
     family_summary = pd.DataFrame(
         {
@@ -619,6 +666,33 @@ def main() -> None:
         table_meta = table_no_meta.copy()
         preds_meta = preds_no_meta
         baseline_meta = baseline_no_meta
+
+    def _print_global_metrics(title: str, table: pd.DataFrame) -> None:
+        if table.empty:
+            print(f"\n{title}")
+            print("AUC=nan, lift@10=nan, lift@20=nan, r_mean@20=nan, spearman=nan")
+            return
+        scorer_row = table.loc[table["model"] == "SCORER"]
+        if scorer_row.empty:
+            scorer_row = table.iloc[[0]]
+        row = scorer_row.iloc[0]
+        print(f"\n{title}")
+        print(
+            "AUC={auc}, lift@10={lift10}, lift@20={lift20}, r_mean@20={rmean20}, spearman={spear}".format(
+                auc=_format_metric(row["auc"]),
+                lift10=_format_metric(row["lift@10"]),
+                lift20=_format_metric(row["lift@20"]),
+                rmean20=_format_metric(row["r_mean@20"]),
+                spear=_format_metric(row["spearman"]),
+            )
+        )
+
+    _print_global_metrics("[GLOBAL METRICS | NO_META | POST FILTER]", table_no_meta)
+    _print_global_metrics("[GLOBAL METRICS | META | POST FILTER]", table_meta)
+    print("\n[SANITY]")
+    print(f"transition_events_present={transition_events_present}")
+    print(f"transition_samples_train={transition_samples_train}")
+    print(f"transition_samples_calib={transition_samples_calib}")
 
     metrics_df = table_meta.copy()
     report_header = {
