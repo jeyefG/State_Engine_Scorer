@@ -417,9 +417,18 @@ def main() -> None:
 
     metrics_rows: list[dict[str, float]] = []
     baseline_rows: list[dict[str, float]] = []
+    bins_margin = pd.Series(dtype="object")
 
     if not y_calib.empty:
         preds = scorer.predict_proba(X_calib, fam_calib)
+        margin_series = df_m5_ctx["margin_H1"].reindex(y_calib.index)
+        bins_margin = pd.Series(index=margin_series.index, dtype="object")
+        margin_non_na = margin_series.dropna()
+        if not margin_non_na.empty:
+            try:
+                bins_margin.loc[margin_non_na.index] = pd.qcut(margin_non_na, q=3, duplicates="drop")
+            except ValueError:
+                bins_margin = pd.Series(index=margin_series.index, dtype="object")
         metrics_rows.append(summarize_metrics("global", preds, y_calib, r_calib, seed=seed))
         rng = np.random.default_rng(seed)
         baseline_scores = pd.Series(rng.random(len(y_calib)), index=y_calib.index)
@@ -447,16 +456,8 @@ def main() -> None:
                 )
             )
 
-        margin_series = df_m5_ctx["margin_H1"].reindex(y_calib.index)
-        bins = pd.Series(index=margin_series.index, dtype="object")
-        margin_non_na = margin_series.dropna()
-        if not margin_non_na.empty:
-            try:
-                bins.loc[margin_non_na.index] = pd.qcut(margin_non_na, q=3, duplicates="drop")
-            except ValueError:
-                bins = pd.Series(index=margin_series.index, dtype="object")
-        if not bins.dropna().empty:
-            for bin_label, bin_labels in y_calib.groupby(bins, observed=True):
+        if not bins_margin.dropna().empty:
+            for bin_label, bin_labels in y_calib.groupby(bins_margin, observed=True):
                 bin_scores = preds.loc[bin_labels.index]
                 bin_r = r_calib.loc[bin_labels.index]
                 metrics_rows.append(
@@ -558,8 +559,9 @@ def main() -> None:
             r_p95=lambda s: s.quantile(0.95),
         )
         .reset_index()
-        .rename(columns={"family_id": "scope"})
     )
+    if not r_stats.empty:
+        r_stats = r_stats.rename(columns={r_stats.columns[0]: "scope"})
     r_stats_global = pd.DataFrame(
         [
             {
@@ -667,40 +669,121 @@ def main() -> None:
 
     margin_bin_rows = []
     margin_reading = "No margin bins available."
-    if not y_calib.empty:
-        margin_series = df_m5_ctx["margin_H1"].reindex(y_calib.index)
-        bins = pd.Series(index=margin_series.index, dtype="object")
-        margin_non_na = margin_series.dropna()
-        if not margin_non_na.empty:
-            try:
-                bins.loc[margin_non_na.index] = pd.qcut(margin_non_na, q=3, duplicates="drop")
-            except ValueError:
-                bins = pd.Series(index=margin_series.index, dtype="object")
-        if not bins.dropna().empty:
-            for bin_label, bin_labels in y_calib.groupby(bins, observed=True):
-                bin_scores = preds.loc[bin_labels.index]
-                bin_r = r_calib.loc[bin_labels.index]
-                bin_metrics = summarize_metrics(
-                    f"margin_bin_{bin_label}",
-                    bin_scores,
-                    bin_labels,
-                    bin_r,
-                    seed=seed,
-                )
-                margin_bin_rows.append(bin_metrics)
-            if margin_bin_rows:
-                margin_df = pd.DataFrame(margin_bin_rows)
-                best_bin = margin_df.loc[margin_df["delta_r_mean@20"].idxmax(), "scope"]
-                worst_bin = margin_df.loc[margin_df["delta_r_mean@20"].idxmin(), "scope"]
-                if best_bin == worst_bin:
-                    margin_reading = "No clear margin bin separation."
-                else:
-                    margin_reading = f"Best delta_r_mean@20 in {best_bin}; worst in {worst_bin}."
+    if not y_calib.empty and not bins_margin.dropna().empty:
+        for bin_label, bin_labels in y_calib.groupby(bins_margin, observed=True):
+            bin_scores = preds.loc[bin_labels.index]
+            bin_r = r_calib.loc[bin_labels.index]
+            bin_metrics = summarize_metrics(
+                f"margin_bin_{bin_label}",
+                bin_scores,
+                bin_labels,
+                bin_r,
+                seed=seed,
+            )
+            margin_bin_rows.append(bin_metrics)
+        if margin_bin_rows:
+            margin_df = pd.DataFrame(margin_bin_rows)
+            best_bin = margin_df.loc[margin_df["delta_r_mean@20"].idxmax(), "scope"]
+            worst_bin = margin_df.loc[margin_df["delta_r_mean@20"].idxmin(), "scope"]
+            if best_bin == worst_bin:
+                margin_reading = "No clear margin bin separation."
+            else:
+                margin_reading = f"Best delta_r_mean@20 in {best_bin}; worst in {worst_bin}."
     if margin_bin_rows:
         logger.info("-" * 96)
         logger.info("F) Margin_H1 stability (calib bins)")
         logger.info("%s", pd.DataFrame(margin_bin_rows).to_string(index=False))
         logger.info("Margin reading: %s", margin_reading)
+
+    if not y_calib.empty:
+        def _choose_bucket_q(sample_count: int) -> int:
+            return 10 if sample_count >= 1000 else 5
+
+        def _score_buckets(scores: pd.Series, q: int) -> pd.Series:
+            buckets = pd.Series(index=scores.index, dtype="object")
+            scores_non_na = scores.dropna()
+            if scores_non_na.empty:
+                return buckets
+            try:
+                buckets.loc[scores_non_na.index] = pd.qcut(scores_non_na, q=q, duplicates="drop")
+            except ValueError:
+                rank_pct = scores_non_na.rank(pct=True)
+                buckets.loc[scores_non_na.index] = pd.cut(rank_pct, bins=5, include_lowest=True)
+            return buckets
+
+        def _bucket_rows(
+            scope: str,
+            scores: pd.Series,
+            labels_: pd.Series,
+            r_outcome: pd.Series,
+            q: int,
+        ) -> list[dict[str, float | str | int]]:
+            buckets = _score_buckets(scores, q=q)
+            if buckets.dropna().empty:
+                return []
+            rows: list[dict[str, float | str | int]] = []
+            for bucket_id, bucket_labels in labels_.groupby(buckets, observed=True):
+                bucket_scores = scores.loc[bucket_labels.index]
+                bucket_r = r_outcome.loc[bucket_labels.index]
+                rows.append(
+                    {
+                        "scope": scope,
+                        "bucket_id": str(bucket_id),
+                        "n": len(bucket_labels),
+                        "score_min": float(bucket_scores.min()) if not bucket_scores.empty else float("nan"),
+                        "score_max": float(bucket_scores.max()) if not bucket_scores.empty else float("nan"),
+                        "label_mean": float(bucket_labels.mean()) if not bucket_labels.empty else float("nan"),
+                        "r_mean": float(bucket_r.mean()) if not bucket_r.empty else float("nan"),
+                        "r_median": float(bucket_r.median()) if not bucket_r.empty else float("nan"),
+                        "r_p25": float(bucket_r.quantile(0.25)) if not bucket_r.empty else float("nan"),
+                        "r_p75": float(bucket_r.quantile(0.75)) if not bucket_r.empty else float("nan"),
+                    }
+                )
+            return rows
+
+        bucket_rows: list[dict[str, float | str | int]] = []
+        global_q = _choose_bucket_q(len(y_calib))
+        bucket_rows.extend(_bucket_rows("global", preds, y_calib, r_calib, q=global_q))
+        for family_id, fam_labels in y_calib.groupby(fam_calib):
+            if len(fam_labels) < 200:
+                logger.debug("skip bucket diag low calib samples: %s n=%s", family_id, len(fam_labels))
+                continue
+            fam_scores = preds.loc[fam_labels.index]
+            fam_r = r_calib.loc[fam_labels.index]
+            fam_q = _choose_bucket_q(len(fam_labels))
+            bucket_rows.extend(_bucket_rows(str(family_id), fam_scores, fam_labels, fam_r, q=fam_q))
+        if bucket_rows:
+            logger.info("-" * 96)
+            logger.info("G) Score buckets diagnostics (calib)")
+            logger.info("%s", pd.DataFrame(bucket_rows).to_string(index=False))
+
+        def _binary_sep_row(scope: str, scores: pd.Series, labels_: pd.Series) -> dict[str, float | str | int]:
+            pos_scores = scores[labels_ == 1]
+            neg_scores = scores[labels_ == 0]
+            n = len(labels_)
+            score_mean_pos = float(pos_scores.mean()) if not pos_scores.empty else float("nan")
+            score_mean_neg = float(neg_scores.mean()) if not neg_scores.empty else float("nan")
+            score_gap = score_mean_pos - score_mean_neg if n else float("nan")
+            if n < 3 or scores.std() == 0 or labels_.std() == 0:
+                corr_score_label = float("nan")
+            else:
+                corr_score_label = float(scores.corr(labels_, method="pearson"))
+            return {
+                "scope": scope,
+                "n": n,
+                "score_mean_pos": score_mean_pos,
+                "score_mean_neg": score_mean_neg,
+                "score_gap": score_gap,
+                "corr_score_label": corr_score_label,
+            }
+
+        binary_rows = [_binary_sep_row("global", preds, y_calib)]
+        for family_id, fam_labels in y_calib.groupby(fam_calib):
+            fam_scores = preds.loc[fam_labels.index]
+            binary_rows.append(_binary_sep_row(str(family_id), fam_scores, fam_labels))
+        logger.info("-" * 96)
+        logger.info("H) Binary separation sanity (calib)")
+        logger.info("%s", pd.DataFrame(binary_rows).to_string(index=False))
 
     metrics_summary = {}
     if not metrics_df.empty:
