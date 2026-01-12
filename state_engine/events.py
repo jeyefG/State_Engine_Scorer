@@ -83,10 +83,7 @@ class EventExtractor:
         upper_wick_ratio = upper_wick / (range_1 + self.eps)
         lower_wick_ratio = lower_wick / (range_1 + self.eps)
 
-        if "atr" in df.columns:
-            atr_14 = df["atr"]
-        else:
-            atr_14 = _atr(high, low, close, 14)
+        atr_14 = _ensure_atr_14(df)
 
         dist_to_vwap_atr = dist_to_vwap / (atr_14 + self.eps)
 
@@ -348,6 +345,26 @@ def _build_events(
     subset["event_id"] = np.nan
     subset["event_features"] = subset[features.columns].to_dict(orient="records")
     return subset
+
+
+def _ensure_atr_14(df: pd.DataFrame) -> pd.Series:
+    for col in ("atr_14", "atr", "ATR", "atr14"):
+        if col in df.columns:
+            series = pd.to_numeric(df[col], errors="coerce").astype(float)
+            series = series.rename("atr_14")
+            return series
+
+    for col in ("high", "low", "close"):
+        if col not in df.columns:
+            raise ValueError(f"Missing required OHLC columns for ATR: {col}")
+
+    if isinstance(df.index, pd.DatetimeIndex) and not df.index.is_monotonic_increasing:
+        sorted_df = df.sort_index()
+        atr = _atr(sorted_df["high"], sorted_df["low"], sorted_df["close"], 14)
+        atr = atr.reindex(df.index)
+    else:
+        atr = _atr(df["high"], df["low"], df["close"], 14)
+    return atr.rename("atr_14")
 
 
 def _atr(high: pd.Series, low: pd.Series, close: pd.Series, window: int) -> pd.Series:

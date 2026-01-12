@@ -126,6 +126,14 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, window: int) -> pd.S
     return tr.rolling(window).mean()
 
 
+def _ensure_atr_14(df: pd.DataFrame) -> pd.Series:
+    for col in ("atr_14", "atr", "ATR", "atr14"):
+        if col in df.columns:
+            series = pd.to_numeric(df[col], errors="coerce").astype(float)
+            return series.rename("atr_14")
+    return _atr(df["high"], df["low"], df["close"], 14).rename("atr_14")
+
+
 def _format_interval(interval: pd.Interval | str) -> str:
     if isinstance(interval, pd.Interval):
         left = f"{interval.left:.2f}"
@@ -234,6 +242,8 @@ def main() -> None:
     ctx_h1 = build_h1_context(ohlcv_h1, state_model, feature_engineer, gating)
 
     df_m5_ctx = merge_h1_m5(ctx_h1, ohlcv_m5)
+    if "atr_14" not in df_m5_ctx.columns:
+        df_m5_ctx["atr_14"] = _ensure_atr_14(df_m5_ctx)
     logger.info("Rows after merge: M5_ctx=%s", len(df_m5_ctx))
     ctx_nan_cols = ["state_hat_H1", "margin_H1"]
     if "atr_short" in df_m5_ctx.columns:
@@ -278,12 +288,12 @@ def main() -> None:
     events_dupes = int(detected_events.index.duplicated().sum())
     logger.info("Detected events by family:\n%s", events["family_id"].value_counts().to_string())
 
-    atr_short = _atr(ohlcv_m5["high"], ohlcv_m5["low"], ohlcv_m5["close"], 14)
     event_indexer = ohlcv_m5.index.get_indexer(events.index)
     missing_index = int((event_indexer == -1).sum())
     missing_future = int(((event_indexer != -1) & (event_indexer + 1 >= len(ohlcv_m5.index))).sum())
-    atr_at_event = atr_short.reindex(events.index)
-    missing_atr_pct = float(atr_at_event.isna().mean() * 100)
+    missing_atr_pct = float(events["atr_14"].isna().mean() * 100)
+    m5_atr14_nan_pct = float(df_m5_ctx["atr_14"].isna().mean() * 100)
+    events_atr14_nan_pct = float(events["atr_14"].isna().mean() * 100)
     sanity_table = pd.DataFrame(
         [
             {
@@ -293,6 +303,8 @@ def main() -> None:
                 "events_missing_index": missing_index,
                 "events_missing_future_slice": missing_future,
                 "events_missing_atr_pct": round(missing_atr_pct, 2),
+                "m5_atr14_nan_pct": round(m5_atr14_nan_pct, 2),
+                "events_atr14_nan_pct": round(events_atr14_nan_pct, 2),
             }
         ]
     )
