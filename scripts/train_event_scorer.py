@@ -212,25 +212,24 @@ def _vwap_zone(dist_to_vwap_atr: pd.Series) -> pd.Series:
     zones = zones.where(dist_to_vwap_atr.notna(), other="UNKNOWN")
     return zones
 
-
 def _value_state(
     overlap_ratio: pd.Series,
     compression_ratio: pd.Series,
     range_width_atr: pd.Series,
 ) -> pd.Series:
     valid = overlap_ratio.notna() & compression_ratio.notna() & range_width_atr.notna()
-    at_value = (overlap_ratio >= 0.6) & (compression_ratio >= 0.8)
-    far_value = (overlap_ratio <= 0.25) & (range_width_atr >= 1.5)
-    near_value = (overlap_ratio >= 0.4) | (compression_ratio >= 0.6)
+
+    at_value = (overlap_ratio >= 0.55) & (compression_ratio >= 0.55)
+    far_value = (overlap_ratio <= 0.25) & (range_width_atr >= 1.20)
+
     states = np.select(
-        [at_value, far_value, near_value],
-        ["AT_VALUE", "FAR_FROM_VALUE", "NEAR_VALUE"],
+        [at_value, far_value],
+        ["AT_VALUE", "FAR_FROM_VALUE"],
         default="NEAR_VALUE",
     )
     states = pd.Series(states, index=overlap_ratio.index)
     states = states.where(valid, other="UNKNOWN")
     return states
-
 
 def _expansion_state(
     range_atr: pd.Series,
@@ -262,9 +261,9 @@ def _encode_pseudo_features(pseudo_features: pd.DataFrame) -> pd.DataFrame:
     for feature_name, categories in PSEUDO_FEATURES.items():
         series = pseudo_features[feature_name].astype("category")
         series = series.cat.set_categories(categories)
-        dummies = pd.get_dummies(series, prefix=feature_name)
+        dummies = pd.get_dummies(series, prefix=f"pf_{feature_name}")
         for category in categories:
-            col = f"{feature_name}_{category}"
+            col = f"pf_{feature_name}_{category}"
             if col not in dummies.columns:
                 dummies[col] = 0
         encoded_parts.append(dummies)
@@ -321,6 +320,48 @@ def _format_metric(value: float) -> str:
         return "nan"
     return f"{value:.4f}"
 
+def _conditional_edge_regime_table(
+    events_diag: pd.DataFrame,
+    pseudo_col: str,
+    min_n: int,
+) -> pd.DataFrame:
+    columns = [
+        "state_hat_H1",
+        "margin_bin",
+        "allow_id",
+        "family_id",
+        pseudo_col,
+        "n",
+        "winrate",
+        "r_mean",
+        "r_median",
+        "p10",
+        "p90",
+    ]
+    if events_diag.empty or pseudo_col not in events_diag.columns:
+        return pd.DataFrame(columns=columns)
+
+    grouped = events_diag.groupby(
+        ["state_hat_H1", "margin_bin", "allow_id", "family_id", pseudo_col],
+        observed=True,
+    )
+
+    summary = grouped.agg(
+        n=("win", "size"),
+        winrate=("win", "mean"),
+        r_mean=("r", "mean"),
+        r_median=("r", "median"),
+        p10=("r", lambda s: s.quantile(0.1)),
+        p90=("r", lambda s: s.quantile(0.9)),
+    ).reset_index()
+
+    summary = summary[summary["n"] >= min_n]
+    summary = summary.sort_values(
+        ["r_mean", "winrate", "n"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
+
+    return summary[columns]
 
 def _meta_policy_mask(
     events_df: pd.DataFrame,
@@ -650,6 +691,13 @@ def _build_training_diagnostic_report(
         redistribution = _redistribution_table(events_diag, pseudo_col)
         conditional = _conditional_edge_table(events_diag, pseudo_col)
         stability_pseudo = _pseudo_stability_table(events_diag, pseudo_col)
+        conditional_regime = _conditional_edge_regime_table(
+            events_diag,
+            pseudo_col,
+            min_n=thresholds.decision_n_min,
+        )
+        report[f"conditional_edge_regime_{pseudo_col}"] = conditional_regime
+        base_frames.append(conditional_regime)
         report[f"redistribution_{pseudo_col}"] = redistribution
         report[f"conditional_edge_{pseudo_col}"] = conditional
         report[f"stability_{pseudo_col}"] = stability_pseudo
@@ -668,6 +716,7 @@ def _build_training_diagnostic_report(
         print(_format_table_block(f"Redistribution (family x {pseudo_col})", report[f"redistribution_{pseudo_col}"]))
         print(_format_table_block(f"Conditional Edge (family x {pseudo_col})", report[f"conditional_edge_{pseudo_col}"]))
         print(_format_table_block(f"Stability temporal (family x {pseudo_col})", report[f"stability_{pseudo_col}"]))
+    print(_format_table_block(f"Conditional Edge REGIME (state x margin x allow x family x {pseudo_col})", report[f"conditional_edge_regime_{pseudo_col}"]))
     return report
 
 
@@ -757,8 +806,14 @@ def main() -> None:
     m5_ctx_dropna = len(df_m5_ctx)
     feature_builder = FeatureBuilder()
     features_all = feature_builder.build(df_m5_ctx)
-    atr_short_mean = features_all["atr_short"].rolling(24, min_periods=6).mean()
-    atr_ratio = features_all["atr_short"] / atr_short_mean.replace(0, np.nan)
+    # --- atr_ratio (diagnostic-only, comparable cross-symbol) ---
+    atr14 = df_m5_ctx["atr_14"].reindex(features_all.index)
+    
+    if "atr_short" in features_all.columns:
+        atr_short = pd.to_numeric(features_all["atr_short"], errors="coerce")
+        atr_ratio = (atr_short / atr14.replace(0, np.nan)).astype(float)
+    else:
+        atr_ratio = pd.Series(np.nan, index=features_all.index)
 
     state_labels_before = df_m5_ctx["state_hat_H1"].map(_state_label)
     state_counts_before = state_labels_before.value_counts()
