@@ -70,3 +70,27 @@ def test_detects_touch_vwap_event() -> None:
     events = extractor.extract(df_m5, symbol="TEST")
 
     assert (events["family_id"] == EventType.TOUCH_VWAP.value).any()
+
+
+def test_events_have_atr_14_after_warmup() -> None:
+    idx = pd.date_range("2024-01-01", periods=30, freq="5min")
+    df_m5 = pd.DataFrame(
+        {
+            "open": [100.0] * 30,
+            "high": [101.0] * 30,
+            "low": [99.0] * 30,
+            "close": [100.0] * 30,
+            "vwap": [100.0] * 30,
+            "volume": [10.0] * 30,
+        },
+        index=idx,
+    )
+
+    extractor = EventExtractor()
+    events = extractor.extract(df_m5, symbol="TEST")
+    assert "atr_14" in events.columns
+
+    warm_idx = idx[14]
+    warm_events = events.loc[events["ts"] >= warm_idx]
+    assert not warm_events.empty
+    assert warm_events["atr_14"].notna().all()
