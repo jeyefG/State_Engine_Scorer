@@ -8,6 +8,7 @@ base rate. lift@K = precision@K / base_rate.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 import io
@@ -1115,7 +1116,7 @@ def main() -> None:
             "=== FALLBACK DIAGNÓSTICO: events_total_post_meta="
             f"{events_total_post_meta} reasons={','.join(fallback_reasons)} ==="
         )
-    _build_training_diagnostic_report(events_diag, df_m5_ctx, thresholds=args)
+    diagnostic_report = _build_training_diagnostic_report(events_diag, df_m5_ctx, thresholds=args)
 
     if is_fallback:
         args.model_dir.mkdir(parents=True, exist_ok=True)
@@ -1710,6 +1711,59 @@ def main() -> None:
             "LightGBM split warnings detected. Consider raising min_samples_train or revisiting features."
         )
         logger.info("Split warning summary:\n%s", warning_summary.to_string(index=False))
+        coverage_global = diagnostic_report.get("coverage_global", pd.DataFrame())
+
+    def _scorer_metric(table: pd.DataFrame, metric: str) -> float | None:
+        if table.empty:
+            return None
+        if "model" in table.columns:
+            scorer_row = table.loc[table["model"] == "SCORER"]
+            if not scorer_row.empty:
+                return scorer_row.iloc[0].get(metric)
+        return table.iloc[0].get(metric)
+
+    def _coverage_metric(table: pd.DataFrame, metric: str) -> float | int | None:
+        if table.empty or metric not in table.columns:
+            return None
+        return table.iloc[0].get(metric)
+
+    def _split_warning_global(table: pd.DataFrame) -> int | None:
+        if table.empty or "scope" not in table.columns or "split_warning_hits" not in table.columns:
+            return None
+        global_row = table.loc[table["scope"] == "global"]
+        if global_row.empty:
+            return None
+        return int(global_row.iloc[0]["split_warning_hits"])
+
+    summary_payload = {
+        "symbol": args.symbol,
+        "start": args.start,
+        "end": args.end,
+        "h1_cutoff": h1_cutoff,
+        "m5_cutoff": m5_cutoff,
+        "events_total_post_meta": _coverage_metric(coverage_global, "events_total_post_meta"),
+        "events_per_day": _coverage_metric(coverage_global, "events_per_day"),
+        "unique_days": _coverage_metric(coverage_global, "unique_days"),
+        "auc_no_meta": _scorer_metric(table_no_meta, "auc"),
+        "auc_meta": _scorer_metric(table_meta, "auc"),
+        "lift20_meta": _scorer_metric(table_meta, "lift@20"),
+        "r_mean20_meta": _scorer_metric(table_meta, "r_mean@20"),
+        "spearman_meta": _scorer_metric(table_meta, "spearman"),
+        "families_trained": int((family_summary["status"] == "TRAINED").sum())
+        if "status" in family_summary.columns
+        else None,
+        "best_regime_id": best_regime,
+        "worst_regime_id": worst_regime,
+        "recommendation": recommendation,
+        "split_warning_hits_global": _split_warning_global(warning_summary),
+        "allow_active_pct": allow_active_pct,
+        "feature_count": event_features_all.shape[1],
+        "min_samples_train": min_samples_train,
+    }
+    summary_path = args.model_dir / f"summary_{_safe_symbol(args.symbol)}_event_scorer.json"
+    with summary_path.open("w", encoding="utf-8") as handle:
+        json.dump(summary_payload, handle, indent=2, default=str)
+    logger.info("summary_out=%s", summary_path)
     logger.info("=" * 96)
 
 
