@@ -301,6 +301,13 @@ def main() -> None:
     scorers: dict[str, EventScorerBundle | None] = {}
     scorer_paths: dict[str, Path] = {}
 
+    def _signal_handler(sig: int, frame: Any) -> None:
+        stop_event.set()
+
+    stop_event = threading.Event()
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
     try:
         for symbol in symbols:
             model, path = load_model(symbol, args.model_dir, args.model_template)
