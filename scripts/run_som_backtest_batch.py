@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("outputs"),
+        default=Path(PROJECT_ROOT / "state_engine" / "models" / "backtests"),
         help="Directorio base para resultados (se crea outputs/<symbol>/)",
     )
     parser.add_argument(
