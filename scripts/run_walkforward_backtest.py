@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import numpy as np
 import pandas as pd
 
 from state_engine.backtest import BacktestConfig, Signal, run_backtest
@@ -66,6 +67,18 @@ def setup_logging(level: str) -> logging.Logger:
     logger.addHandler(handler)
     logger.propagate = False
     return logger
+
+
+def _json_default(obj: object) -> str | float | int:
+    if isinstance(obj, (pd.Timestamp, datetime)):
+        return obj.isoformat()
+    if isinstance(obj, pd.Timedelta):
+        return str(obj)
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, (np.integer, np.floating)):
+        return obj.item()
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
 
 def build_h1_context(
@@ -450,7 +463,7 @@ def run_walkforward(symbol: str, args: argparse.Namespace, logger: logging.Logge
         }
         metrics_path = fold_dir / "metrics.json"
         with metrics_path.open("w", encoding="utf-8") as handle:
-            json.dump(fold_metrics, handle, indent=2)
+            json.dump(fold_metrics, handle, indent=2, default=_json_default)
 
         summary_rows.append(
             {
