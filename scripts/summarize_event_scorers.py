@@ -157,6 +157,40 @@ def _extract_calib_summary(calib_path: Path | None) -> dict[str, str | bool | No
     return result
 
 
+def _extract_summary_json(summary_path: Path | None) -> dict[str, object | None]:
+    fields = {
+        "symbol": None,
+        "start": None,
+        "end": None,
+        "h1_cutoff": None,
+        "m5_cutoff": None,
+        "events_total_post_meta": None,
+        "events_per_day": None,
+        "unique_days": None,
+        "auc_no_meta": None,
+        "auc_meta": None,
+        "lift20_meta": None,
+        "r_mean20_meta": None,
+        "spearman_meta": None,
+        "families_trained": None,
+        "best_regime_id": None,
+        "worst_regime_id": None,
+        "recommendation": None,
+        "split_warning_hits_global": None,
+        "allow_active_pct": None,
+        "feature_count": None,
+        "min_samples_train": None,
+    }
+    if summary_path is None or not summary_path.exists():
+        return fields
+    with summary_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    for key in fields:
+        if key in payload:
+            fields[key] = payload.get(key)
+    return fields
+
+
 def _format_float(value: float | int | None, decimals: int) -> str:
     if value is None or pd.isna(value):
         return "NA"
@@ -167,6 +201,12 @@ def _format_int(value: float | int | None) -> str:
     if value is None or pd.isna(value):
         return "NA"
     return f"{int(value)}"
+
+
+def _prefer(primary: object | None, fallback: object | None) -> object | None:
+    if primary is None or (isinstance(primary, float) and pd.isna(primary)):
+        return fallback
+    return primary
 
 
 def _build_table(rows: list[dict[str, str]], columns: list[str]) -> str:
@@ -186,6 +226,7 @@ def _collect_symbols(models_dir: Path) -> dict[str, dict[str, Path]]:
         "metrics": "metrics_*_event_scorer.csv",
         "family": "family_summary_*_event_scorer.csv",
         "calib": "calib_top_scored_*_event_scorer.csv",
+        "summary": "summary_*_event_scorer.json",
     }
     symbols: dict[str, dict[str, Path]] = {}
     for key, pattern in patterns.items():
@@ -210,26 +251,30 @@ def main() -> None:
 
     for symbol in sorted(symbols.keys()):
         artifacts = symbols[symbol]
+        summary = _extract_summary_json(artifacts.get("summary"))
         metrics = _extract_metrics(artifacts.get("metrics"))
         families = _extract_family_summary(artifacts.get("family"))
         calib = _extract_calib_summary(artifacts.get("calib"))
 
         row = {
             "symbol": symbol,
-            "events_total_post_meta": metrics["events_total_post_meta"],
-            "events_per_day": metrics["events_per_day"],
-            "unique_days": metrics["unique_days"],
-            "families_trained": families["families_trained"],
-            "auc_no_meta": metrics["auc_no_meta"],
-            "auc_meta": metrics["auc_meta"],
-            "lift20_meta": metrics["lift20_meta"],
-            "r_mean20_meta": metrics["r_mean20_meta"],
-            "spearman_meta": metrics["spearman_meta"],
-            "best_regime_id": calib["best_regime_id"],
-            "worst_regime_id": calib["worst_regime_id"],
-            "recommendation": metrics["recommendation"],
+            "events_total_post_meta": _prefer(summary["events_total_post_meta"], metrics["events_total_post_meta"]),
+            "events_per_day": _prefer(summary["events_per_day"], metrics["events_per_day"]),
+            "unique_days": _prefer(summary["unique_days"], metrics["unique_days"]),
+            "families_trained": _prefer(summary["families_trained"], families["families_trained"]),
+            "auc_no_meta": _prefer(summary["auc_no_meta"], metrics["auc_no_meta"]),
+            "auc_meta": _prefer(summary["auc_meta"], metrics["auc_meta"]),
+            "lift20_meta": _prefer(summary["lift20_meta"], metrics["lift20_meta"]),
+            "r_mean20_meta": _prefer(summary["r_mean20_meta"], metrics["r_mean20_meta"]),
+            "spearman_meta": _prefer(summary["spearman_meta"], metrics["spearman_meta"]),
+            "best_regime_id": _prefer(summary["best_regime_id"], calib["best_regime_id"]),
+            "worst_regime_id": _prefer(summary["worst_regime_id"], calib["worst_regime_id"]),
+            "recommendation": _prefer(summary["recommendation"], metrics["recommendation"]),
             "any_low_samples_flag": calib["any_low_samples_flag"],
-            "split_warning_hits_global": metrics["split_warning_hits_global"],
+            "split_warning_hits_global": _prefer(
+                summary["split_warning_hits_global"],
+                metrics["split_warning_hits_global"],
+            ),
         }
 
         missing_fields = [
@@ -270,6 +315,14 @@ def main() -> None:
 
     print(f"EVENT SCORER | SUMMARY ({len(df)} symbols)")
     print(_build_table(console_rows, ["symbol", "events", "/day", "aucM", "lift20M", "r20M", "sprM", "families", "recommendation"]))
+
+    expected_symbols = {
+        path.name[: -len("_event_scorer.pkl")]
+        for path in args.models_dir.glob("*_event_scorer.pkl")
+    }
+    missing_summaries = expected_symbols - set(symbols.keys())
+    if missing_summaries:
+        print(f"MISSING_SUMMARIES={len(missing_summaries)}")
 
     output_dir = args.models_dir
     output_dir.mkdir(parents=True, exist_ok=True)
