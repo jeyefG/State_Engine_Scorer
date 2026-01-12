@@ -325,14 +325,20 @@ def main() -> None:
     )
     metrics_by_family = {key: value for key, value in metrics.items() if key.startswith("family:")}
     metrics_by_edge_bin = {key: value for key, value in metrics.items() if key.startswith("edge_bin:")}
+    if trades_df.empty or "pnl" not in trades_df.columns:
+        top_trades: list[dict[str, object]] = []
+        worst_trades: list[dict[str, object]] = []
+    else:
+        top_trades = trades_df.sort_values("pnl", ascending=False).head(10).to_dict(orient="records")
+        worst_trades = trades_df.sort_values("pnl", ascending=True).head(10).to_dict(orient="records")
     print_section(
         "BACKTEST",
         [
             f"global={metrics.get('global', {})}",
             f"by_family={metrics_by_family}",
             f"by_edge_bin={metrics_by_edge_bin}",
-            f"top10_trades={trades_df.sort_values('pnl', ascending=False).head(10).to_dict(orient='records')}",
-            f"worst10_trades={trades_df.sort_values('pnl', ascending=True).head(10).to_dict(orient='records')}",
+            f"top10_trades={top_trades}",
+            f"worst10_trades={worst_trades}",
         ],
     )
     if not equity_df.empty:
