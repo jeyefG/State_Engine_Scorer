@@ -43,6 +43,25 @@ Notas:
 - También se guarda un CSV opcional en `state_engine/models/metrics_{symbol}_event_scorer.csv`.
 ```
 
+### Configuración por símbolo (Event Scorer)
+
+Puedes definir overrides por símbolo en YAML/JSON sin romper la CLI actual. Si no pasas `--config`,
+se usan los defaults de siempre.
+
+Plantilla: `configs/symbols/_template.yaml`.
+
+Ejemplo:
+
+```bash
+python scripts/train_event_scorer.py \
+  --config configs/symbols/XAUUSD.mg.yaml \
+  --mode research
+```
+
+Notas:
+- `--mode` solo afecta los thresholds diagnósticos del reporte (no cambia el entrenamiento).
+- El trainer del State Engine (H1) sigue usando solo argumentos CLI por ahora.
+
 Ejecuta el pipeline de backtest (State Engine H1 → Events M5 → Scorer → Signals → Backtest):
 
 ```bash

@@ -1,0 +1,33 @@
+symbol: "XAUUSD.mg"
+event_scorer:
+  train_ratio: 0.8
+  k_bars: 24
+  reward_r: 1.0
+  sl_mult: 1.0
+  r_thr: 0.0
+  tie_break: "distance"
+  include_transition: true
+  meta_policy:
+    enabled: true
+    meta_margin_min: 0.10
+    meta_margin_max: 0.95
+  family_training:
+    min_samples_train: 200
+  decision_thresholds:
+    n_min: 200
+    winrate_min: 0.52
+    r_mean_min: 0.02
+    p10_min: -0.2
+  modes:
+    research:
+      decision_thresholds:
+        n_min: 100
+        winrate_min: 0.50
+        r_mean_min: 0.02
+        p10_min: null
+    production:
+      decision_thresholds:
+        n_min: 200
+        winrate_min: 0.52
+        r_mean_min: 0.02
+        p10_min: -0.2
