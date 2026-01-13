@@ -10,12 +10,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import io
 from pathlib import Path
 import sys
 import textwrap
-from contextlib import redirect_stderr, redirect_stdout
 
 import numpy as np
 
@@ -34,6 +34,7 @@ from state_engine.mt5_connector import MT5Connector
 from state_engine.labels import StateLabels
 from state_engine.scoring import EventScorer, EventScorerBundle, EventScorerConfig, FeatureBuilder
 from state_engine.session import get_session_bucket
+from state_engine.config_loader import deep_merge, load_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,8 +77,53 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decision-winrate-min", type=float, default=0.52, help="Winrate mínimo para decision tradeable")
     parser.add_argument("--decision-p10-min", type=float, default=-0.2, help="p10 mínimo para decision tradeable")
     parser.add_argument("--fallback-min-samples", type=int, default=300, help="Mínimo de muestras post-meta para metrics")
+    parser.add_argument("--config", type=Path, default=None, help="Ruta config YAML/JSON con overrides por símbolo")
+    parser.add_argument(
+        "--mode",
+        default="production",
+        choices=["research", "production"],
+        help="Modo de thresholds para reportes diagnósticos",
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level (INFO, DEBUG, WARNING)")
     return parser.parse_args()
+
+
+def _default_symbol_config(args: argparse.Namespace) -> dict:
+    return {
+        "symbol": args.symbol,
+        "event_scorer": {
+            "train_ratio": args.train_ratio,
+            "k_bars": args.k_bars,
+            "reward_r": args.reward_r,
+            "sl_mult": args.sl_mult,
+            "r_thr": args.r_thr,
+            "tie_break": args.tie_break,
+            "include_transition": args.include_transition == "on",
+            "meta_policy": {
+                "enabled": args.meta_policy == "on",
+                "meta_margin_min": args.meta_margin_min,
+                "meta_margin_max": args.meta_margin_max,
+            },
+            "family_training": {
+                "min_samples_train": 200,
+            },
+            "decision_thresholds": {
+                "n_min": args.decision_n_min,
+                "winrate_min": args.decision_winrate_min,
+                "r_mean_min": args.decision_r_mean_min,
+                "p10_min": args.decision_p10_min,
+            },
+        },
+    }
+
+
+def _resolve_decision_thresholds(config: dict, mode: str) -> dict:
+    event_cfg = config.get("event_scorer", {}) if isinstance(config.get("event_scorer"), dict) else {}
+    base_thresholds = event_cfg.get("decision_thresholds", {}) or {}
+    mode_thresholds = (
+        event_cfg.get("modes", {}).get(mode, {}).get("decision_thresholds", {}) if isinstance(event_cfg.get("modes"), dict) else {}
+    )
+    return deep_merge(base_thresholds, mode_thresholds or {})
 
 
 def setup_logging(level: str) -> logging.Logger:
@@ -578,7 +624,7 @@ def _decision_table(events_diag: pd.DataFrame, thresholds: argparse.Namespace) -
             reasons.append(f"r_mean<{thresholds.decision_r_mean_min}")
         if row["winrate"] < thresholds.decision_winrate_min:
             reasons.append(f"winrate<{thresholds.decision_winrate_min}")
-        if row["p10"] < thresholds.decision_p10_min:
+        if thresholds.decision_p10_min is not None and row["p10"] < thresholds.decision_p10_min:
             reasons.append(f"p10<{thresholds.decision_p10_min}")
         decision = "TRADEABLE" if not reasons else "NO_TRADEABLE"
         decisions.append(
@@ -777,6 +823,47 @@ def main() -> None:
     logger = setup_logging(args.log_level)
     min_samples_train = 200
     seed = 7
+
+    config_path = args.config
+    if config_path is not None:
+        defaults = _default_symbol_config(args)
+        overrides = load_config(config_path)
+        merged = deep_merge(defaults, overrides)
+
+        args.symbol = merged.get("symbol", args.symbol)
+        event_cfg = merged.get("event_scorer", {})
+        if isinstance(event_cfg, dict):
+            args.train_ratio = event_cfg.get("train_ratio", args.train_ratio)
+            args.k_bars = event_cfg.get("k_bars", args.k_bars)
+            args.reward_r = event_cfg.get("reward_r", args.reward_r)
+            args.sl_mult = event_cfg.get("sl_mult", args.sl_mult)
+            args.r_thr = event_cfg.get("r_thr", args.r_thr)
+            args.tie_break = event_cfg.get("tie_break", args.tie_break)
+
+            include_transition = event_cfg.get("include_transition")
+            if include_transition is not None:
+                args.include_transition = "on" if include_transition else "off"
+
+            meta_cfg = event_cfg.get("meta_policy", {})
+            if isinstance(meta_cfg, dict):
+                enabled = meta_cfg.get("enabled")
+                if enabled is not None:
+                    args.meta_policy = "on" if enabled else "off"
+                args.meta_margin_min = meta_cfg.get("meta_margin_min", args.meta_margin_min)
+                args.meta_margin_max = meta_cfg.get("meta_margin_max", args.meta_margin_max)
+
+            family_cfg = event_cfg.get("family_training", {})
+            if isinstance(family_cfg, dict):
+                min_samples_train = family_cfg.get("min_samples_train", min_samples_train)
+
+            thresholds = _resolve_decision_thresholds(merged, args.mode)
+            if thresholds:
+                args.decision_n_min = thresholds.get("n_min", args.decision_n_min)
+                args.decision_winrate_min = thresholds.get("winrate_min", args.decision_winrate_min)
+                args.decision_r_mean_min = thresholds.get("r_mean_min", args.decision_r_mean_min)
+                args.decision_p10_min = thresholds.get("p10_min", args.decision_p10_min)
+
+        logger.info("Loaded config overrides from %s (mode=%s)", config_path, args.mode)
 
     def _safe_symbol(sym: str) -> str:
         return "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in sym)
@@ -1684,6 +1771,18 @@ def main() -> None:
         "sl_mult": args.sl_mult,
         "r_thr": args.r_thr,
         "tie_break": args.tie_break,
+        "include_transition": args.include_transition,
+        "meta_policy": args.meta_policy,
+        "meta_margin_min": args.meta_margin_min,
+        "meta_margin_max": args.meta_margin_max,
+        "decision_thresholds": {
+            "n_min": args.decision_n_min,
+            "winrate_min": args.decision_winrate_min,
+            "r_mean_min": args.decision_r_mean_min,
+            "p10_min": args.decision_p10_min,
+        },
+        "config_path": str(args.config) if args.config else None,
+        "config_mode": args.mode,
         "feature_count": event_features_all.shape[1],
         "train_date": datetime.now(timezone.utc).isoformat(),
         "metrics_summary": metrics_summary,
