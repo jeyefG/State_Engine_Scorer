@@ -935,6 +935,11 @@ def _build_research_context_features(
     feature_flags = research_cfg.get("features", {}) if isinstance(research_cfg.get("features"), dict) else {}
     logger = logging.getLogger("event_scorer")
     raw_anchor_hour = research_cfg.get("d1_anchor_hour", 0)
+    is_valid_anchor_hour = (
+        isinstance(raw_anchor_hour, (int, np.integer))
+        and not isinstance(raw_anchor_hour, bool)
+        and 0 <= raw_anchor_hour <= 23
+    )
     try:
         parsed_anchor_hour = int(raw_anchor_hour)
     except (TypeError, ValueError):
@@ -944,16 +949,12 @@ def _build_research_context_features(
             raw_anchor_hour,
         )
     else:
-        if (
-            isinstance(raw_anchor_hour, bool)
-            or not isinstance(raw_anchor_hour, (int, np.integer))
-            or not 0 <= raw_anchor_hour <= 23
-        ):
+        if not is_valid_anchor_hour:
             logger.warning(
                 "Invalid research.d1_anchor_hour=%r; normalizing to [0, 23] via modulo.",
                 raw_anchor_hour,
             )
-    d1_anchor_hour = parsed_anchor_hour % 24
+    d1_anchor_hour = parsed_anchor_hour if is_valid_anchor_hour else parsed_anchor_hour % 24
     parts: list[pd.DataFrame] = []
     index = df_m5_ctx.index
 
