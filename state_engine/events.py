@@ -270,32 +270,55 @@ class EventExtractor:
 
 
 def _compute_vwap(df: pd.DataFrame, *, vwap_col: str, reset_mode: str) -> pd.Series:
+    """
+    VWAP fallback usando el método "validado" (pivot_price + HV con tick_volume).
+
+    Método:
+      - HH = rolling max(high, vwap_win)
+      - LL = rolling min(low, vwap_win)
+      - HV = rolling max(tick_volume, vwap_win)
+      - pivot_price = (HH + LL + close) / 3
+      - vwap = cumsum(pivot_price * HV) / cumsum(HV)
+
+    reset_mode:
+      - "cumulative": una sola acumulación en todo el DF
+      - "daily": resetea por día calendario (según timestamp extraído)
+      - "session": resetea por session_id/session
+    """
     required = {"high", "low", "close"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing required OHLC columns for VWAP: {sorted(missing)}")
 
-    volume = None
-    for col in ("volume", "tick_volume"):
-        if col in df.columns:
-            volume = df[col]
-            break
-
-    if volume is None:
+    # Exigir tick_volume (como pediste). Si no está, no hacemos fallback con volume.
+    if "tick_volume" not in df.columns:
         raise ValueError(
-            f"Missing VWAP column '{vwap_col}' and no volume/tick_volume available to compute it"
+            f"Missing VWAP column '{vwap_col}' and no tick_volume available to compute it"
         )
 
     if reset_mode not in {"daily", "session", "cumulative"}:
         raise ValueError("vwap_reset_mode must be 'daily', 'session', or 'cumulative'")
 
-    typical_price = df[["high", "low", "close"]].mean(axis=1)
-    pv = typical_price.mul(volume)
+    # Parámetros del método "validado"
+    vwap_win = 50  # puedes ajustar; aquí fijo por minimalismo
+
+    def _compute_group(g: pd.DataFrame) -> pd.Series:
+        hh = g["high"].rolling(vwap_win, min_periods=1).max()
+        ll = g["low"].rolling(vwap_win, min_periods=1).min()
+        hv = g["tick_volume"].rolling(vwap_win, min_periods=1).max()
+
+        pivot_price = (hh + ll + g["close"]) / 3.0
+        pivot_vol = hv.astype(float)
+
+        cum_vol = pivot_vol.cumsum().replace(0, np.nan)
+        cum_pv = (pivot_price * pivot_vol).cumsum()
+
+        vwap = cum_pv / cum_vol
+        vwap.name = vwap_col
+        return vwap
 
     if reset_mode == "cumulative":
-        cumulative_volume = volume.cumsum()
-        vwap = pv.cumsum() / cumulative_volume.replace(0, np.nan)
-        return vwap
+        return _compute_group(df)
 
     if reset_mode == "session":
         session_col = None
@@ -310,10 +333,9 @@ def _compute_vwap(df: pd.DataFrame, *, vwap_col: str, reset_mode: str) -> pd.Ser
         ts = _extract_timestamp(df)
         group_key = pd.to_datetime(ts).dt.date
 
-    grouped = df.assign(_pv=pv, _vol=volume).groupby(group_key, sort=False)
-    cumulative_pv = grouped["_pv"].cumsum()
-    cumulative_vol = grouped["_vol"].cumsum().replace(0, np.nan)
-    vwap = cumulative_pv / cumulative_vol
+    # groupby con sort=False para respetar el orden original
+    vwap = df.groupby(group_key, sort=False, group_keys=False).apply(_compute_group)
+    vwap.name = vwap_col
     return vwap
 
 
