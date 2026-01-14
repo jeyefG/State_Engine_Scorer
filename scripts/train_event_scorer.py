@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import logging
+import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import io
@@ -42,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     default_end = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
     default_start = (datetime.today() - timedelta(days=700)).strftime("%Y-%m-%d")
     parser = argparse.ArgumentParser(description="Train Event Scorer model.")
-    parser.add_argument("--symbol", default="EURUSD", help="Símbolo MT5 (ej. EURUSD)")
+    parser.add_argument("--symbol", required=True, help="Símbolo MT5 (ej. EURUSD)")
     parser.add_argument("--start", default=default_start, help="Fecha inicio (YYYY-MM-DD) para descarga score/allow")
     parser.add_argument("--end", default=default_end, help="Fecha fin (YYYY-MM-DD) para descarga score/allow")
     parser.add_argument("--score-tf", default="M5", help="Timeframe para scoring (ej. M5, M15)")
@@ -80,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decision-winrate-min", type=float, default=0.52, help="Winrate mínimo para decision tradeable")
     parser.add_argument("--decision-p10-min", type=float, default=-0.2, help="p10 mínimo para decision tradeable")
     parser.add_argument("--fallback-min-samples", type=int, default=300, help="Mínimo de muestras post-meta para metrics")
-    parser.add_argument("--config", type=Path, default=None, help="Ruta config YAML/JSON con overrides por símbolo")
+    parser.add_argument("--config", default="on", choices=["on", "off"], help="Activar config YAML por símbolo")
     parser.add_argument(
         "--mode",
         default="baseline",
@@ -93,7 +94,6 @@ def parse_args() -> argparse.Namespace:
 
 def _default_symbol_config(args: argparse.Namespace) -> dict:
     return {
-        "symbol": args.symbol,
         "event_scorer": {
             "score_tf": args.score_tf,
             "allow_tf": args.allow_tf,
@@ -249,6 +249,35 @@ def _with_suffix(path: Path, suffix: str) -> Path:
 
 def _safe_symbol(sym: str) -> str:
     return "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in sym)
+
+
+def _output_prefix(symbol: str, score_tf: str, run_id: str) -> str:
+    return f"{_safe_symbol(symbol)}_{_safe_symbol(score_tf)}_{run_id}"
+
+
+def _attach_output_metadata(
+    df: pd.DataFrame,
+    *,
+    run_id: str,
+    symbol: str,
+    allow_tf: str,
+    score_tf: str,
+    config_path: Path | None,
+) -> pd.DataFrame:
+    output = df.copy()
+    metadata = [
+        ("run_id", run_id),
+        ("symbol", symbol),
+        ("allow_tf", allow_tf),
+        ("score_tf", score_tf),
+        ("config_path", str(config_path) if config_path is not None else None),
+    ]
+    for key, value in reversed(metadata):
+        if key in output.columns:
+            output[key] = value
+        else:
+            output.insert(0, key, value)
+    return output
 
 
 def _normalize_timeframe(timeframe: str) -> str:
@@ -915,6 +944,10 @@ def _build_research_summary_from_grid(grid_results: pd.DataFrame) -> dict[str, o
 def _persist_research_outputs(
     model_dir: Path,
     symbol: str,
+    allow_tf: str,
+    score_tf: str,
+    run_id: str,
+    config_path: Path | None,
     grid_results: pd.DataFrame,
     summary_payload: dict[str, object],
     research_cfg: dict,
@@ -926,12 +959,25 @@ def _persist_research_outputs(
     if not research_mode:
         return
     model_dir.mkdir(parents=True, exist_ok=True)
-    safe_symbol = _safe_symbol(symbol)
-    grid_path = model_dir / f"research_grid_results_{safe_symbol}{mode_suffix}.csv"
-    grid_results.to_csv(grid_path, index=False)
-    summary_path = model_dir / f"research_summary_{safe_symbol}{mode_suffix}.json"
+    output_prefix = _output_prefix(symbol, score_tf, run_id)
+    grid_path = model_dir / f"research_grid_results_{output_prefix}{mode_suffix}.csv"
+    grid_output = _attach_output_metadata(
+        grid_results,
+        run_id=run_id,
+        symbol=symbol,
+        allow_tf=allow_tf,
+        score_tf=score_tf,
+        config_path=config_path,
+    )
+    grid_output.to_csv(grid_path, index=False)
+    summary_path = model_dir / f"research_summary_{output_prefix}{mode_suffix}.json"
     payload = {
         "enabled": bool(research_cfg.get("enabled", False)),
+        "run_id": run_id,
+        "symbol": symbol,
+        "allow_tf": allow_tf,
+        "score_tf": score_tf,
+        "config_path": str(config_path) if config_path is not None else None,
         "qualified_session_buckets": summary_payload.get("qualified_session_buckets", 0),
         "top_5_candidate_cells_by_r_mean": summary_payload.get("top_5_candidate_cells_by_r_mean", []),
         "verdict": summary_payload.get("verdict", "NO LOCAL EDGE DETECTED"),
@@ -1485,6 +1531,9 @@ def _run_training_for_k(
     args: argparse.Namespace,
     k_bars: int,
     output_suffix: str,
+    output_prefix: str,
+    run_id: str,
+    config_path: Path | None,
     detected_events: pd.DataFrame,
     event_config: EventDetectionConfig,
     df_score_ctx: pd.DataFrame,
@@ -1750,15 +1799,31 @@ def _run_training_for_k(
     if is_fallback:
         args.model_dir.mkdir(parents=True, exist_ok=True)
         detected_path = _with_suffix(
-            args.model_dir / f"events_detected_{''.join(ch if (ch.isalnum() or ch in '._-') else '_' for ch in args.symbol)}.csv",
+            args.model_dir / f"events_detected_{output_prefix}.csv",
             output_suffix,
         )
         labeled_path = _with_suffix(
-            args.model_dir / f"events_labeled_{''.join(ch if (ch.isalnum() or ch in '._-') else '_' for ch in args.symbol)}.csv",
+            args.model_dir / f"events_labeled_{output_prefix}.csv",
             output_suffix,
         )
-        _reset_index_for_export(detected_events).to_csv(detected_path, index=False)
-        _reset_index_for_export(labeled_events).to_csv(labeled_path, index=False)
+        detected_output = _attach_output_metadata(
+            _reset_index_for_export(detected_events),
+            run_id=run_id,
+            symbol=args.symbol,
+            allow_tf=args.allow_tf,
+            score_tf=args.score_tf,
+            config_path=config_path,
+        )
+        labeled_output = _attach_output_metadata(
+            _reset_index_for_export(labeled_events),
+            run_id=run_id,
+            symbol=args.symbol,
+            allow_tf=args.allow_tf,
+            score_tf=args.score_tf,
+            config_path=config_path,
+        )
+        detected_output.to_csv(detected_path, index=False)
+        labeled_output.to_csv(labeled_path, index=False)
         logger.info("fallback_events_detected_out=%s", detected_path)
         logger.info("fallback_events_labeled_out=%s", labeled_path)
         if not events_for_training.empty:
@@ -1845,15 +1910,31 @@ def _run_training_for_k(
         logger.error("Global training labels have a single class; cannot train scorer.")
         args.model_dir.mkdir(parents=True, exist_ok=True)
         detected_path = _with_suffix(
-            args.model_dir / f"events_detected_{''.join(ch if (ch.isalnum() or ch in '._-') else '_' for ch in args.symbol)}.csv",
+            args.model_dir / f"events_detected_{output_prefix}.csv",
             output_suffix,
         )
         labeled_path = _with_suffix(
-            args.model_dir / f"events_labeled_{''.join(ch if (ch.isalnum() or ch in '._-') else '_' for ch in args.symbol)}.csv",
+            args.model_dir / f"events_labeled_{output_prefix}.csv",
             output_suffix,
         )
-        _reset_index_for_export(detected_events).to_csv(detected_path, index=False)
-        _reset_index_for_export(labeled_events).to_csv(labeled_path, index=False)
+        detected_output = _attach_output_metadata(
+            _reset_index_for_export(detected_events),
+            run_id=run_id,
+            symbol=args.symbol,
+            allow_tf=args.allow_tf,
+            score_tf=args.score_tf,
+            config_path=config_path,
+        )
+        labeled_output = _attach_output_metadata(
+            _reset_index_for_export(labeled_events),
+            run_id=run_id,
+            symbol=args.symbol,
+            allow_tf=args.allow_tf,
+            score_tf=args.score_tf,
+            config_path=config_path,
+        )
+        detected_output.to_csv(detected_path, index=False)
+        labeled_output.to_csv(labeled_path, index=False)
         logger.info("fallback_events_detected_out=%s", detected_path)
         logger.info("fallback_events_labeled_out=%s", labeled_path)
         if not events_for_training.empty:
@@ -2308,6 +2389,7 @@ def _run_training_for_k(
             metrics_summary = scorer_row.iloc[0].to_dict()
 
     metadata = {
+        "run_id": run_id,
         "symbol": args.symbol,
         "score_tf": args.score_tf,
         "allow_tf": args.allow_tf,
@@ -2327,7 +2409,7 @@ def _run_training_for_k(
             "r_mean_min": args.decision_r_mean_min,
             "p10_min": args.decision_p10_min,
         },
-        "config_path": str(args.config) if args.config else None,
+        "config_path": str(config_path) if config_path is not None else None,
         "config_mode": args.mode,
         "feature_count": event_features_all.shape[1],
         "train_date": datetime.now(timezone.utc).isoformat(),
@@ -2357,17 +2439,33 @@ def _run_training_for_k(
     if not metrics_df.empty:
         metrics_path = _with_suffix(
             args.model_dir
-            / f"metrics_{_safe_symbol(args.symbol)}_event_scorer{mode_suffix}.csv",
+            / f"metrics_{output_prefix}_event_scorer{mode_suffix}.csv",
             output_suffix,
         )
-        metrics_df.to_csv(metrics_path, index=False)
+        metrics_output = _attach_output_metadata(
+            metrics_df,
+            run_id=run_id,
+            symbol=args.symbol,
+            allow_tf=args.allow_tf,
+            score_tf=args.score_tf,
+            config_path=config_path,
+        )
+        metrics_output.to_csv(metrics_path, index=False)
         logger.info("metrics_out=%s", metrics_path)
     family_path = _with_suffix(
         args.model_dir
-        / f"family_summary_{_safe_symbol(args.symbol)}_event_scorer{mode_suffix}.csv",
+        / f"family_summary_{output_prefix}_event_scorer{mode_suffix}.csv",
         output_suffix,
     )
-    family_summary.to_csv(family_path, index=False)
+    family_output = _attach_output_metadata(
+        family_summary,
+        run_id=run_id,
+        symbol=args.symbol,
+        allow_tf=args.allow_tf,
+        score_tf=args.score_tf,
+        config_path=config_path,
+    )
+    family_output.to_csv(family_path, index=False)
     logger.info("family_summary_out=%s", family_path)
 
     if not y_calib.empty and preds_meta is not None:
@@ -2379,10 +2477,18 @@ def _run_training_for_k(
         sample_df = sample_df.reset_index().rename(columns={sample_df.index.name or "index": "time"})
         sample_path = _with_suffix(
             args.model_dir
-            / f"calib_top_scored_{_safe_symbol(args.symbol)}_event_scorer{mode_suffix}.csv",
+            / f"calib_top_scored_{output_prefix}_event_scorer{mode_suffix}.csv",
             output_suffix,
         )
-        sample_df.to_csv(sample_path, index=False)
+        sample_output = _attach_output_metadata(
+            sample_df,
+            run_id=run_id,
+            symbol=args.symbol,
+            allow_tf=args.allow_tf,
+            score_tf=args.score_tf,
+            config_path=config_path,
+        )
+        sample_output.to_csv(sample_path, index=False)
         logger.info("calib_top_scored_out=%s", sample_path)
 
     if global_scorer._model is not None and hasattr(global_scorer._model, "feature_importances_"):
@@ -2423,11 +2529,13 @@ def _run_training_for_k(
         return int(global_row.iloc[0]["split_warning_hits"])
 
     summary_payload = {
+        "run_id": run_id,
         "symbol": args.symbol,
         "start": args.start,
         "end": args.end,
         "score_tf": args.score_tf,
         "allow_tf": args.allow_tf,
+        "config_path": str(config_path) if config_path is not None else None,
         "allow_cutoff": h1_cutoff,
         "h1_cutoff": h1_cutoff,
         "m5_cutoff": score_cutoff,
@@ -2480,7 +2588,7 @@ def _run_training_for_k(
         summary_payload["research"] = research_summary_payload
 
     summary_path = _with_suffix(
-        args.model_dir / f"summary_{''.join(ch if (ch.isalnum() or ch in '._-') else '_' for ch in args.symbol)}_event_scorer.json",
+        args.model_dir / f"summary_{output_prefix}_event_scorer.json",
         output_suffix,
     )
     with summary_path.open("w", encoding="utf-8") as handle:
@@ -2523,15 +2631,19 @@ def main() -> None:
     research_cfg: dict[str, object] = {"enabled": False, "features": {}, "diagnostics": {}, "k_bars_grid": None}
     config_hash = None
     prompt_version = None
+    run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}"
 
-    config_path = args.config
+    config_path: Path | None = None
+    if args.config == "on":
+        config_path = PROJECT_ROOT / "configs" / "symbols" / f"{args.symbol}.yaml"
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config not found: {config_path}")
     config_payload = _default_symbol_config(args)
     if config_path is not None:
         overrides = load_config(config_path)
         merged = deep_merge(config_payload, overrides)
         config_payload = merged
 
-        args.symbol = merged.get("symbol", args.symbol)
         event_cfg = merged.get("event_scorer", {})
         if isinstance(event_cfg, dict):
             args.score_tf = event_cfg.get("score_tf", args.score_tf)
@@ -2581,6 +2693,16 @@ def main() -> None:
     if event_cfg:
         args.k_bars = _resolve_k_bars_by_tf(event_cfg, args.score_tf, args.k_bars)
 
+    logger.info(
+        "Run init | symbol=%s config_path=%s allow_tf=%s score_tf=%s mode=%s run_id=%s",
+        args.symbol,
+        config_path,
+        args.allow_tf,
+        args.score_tf,
+        args.mode,
+        run_id,
+    )
+
     research_mode = args.mode == "research"
     research_enabled = research_mode and bool(research_cfg.get("enabled", False))
     mode_suffix = _mode_suffix(args.mode)
@@ -2598,8 +2720,9 @@ def main() -> None:
         model_path = args.model_dir / f"{_safe_symbol(args.symbol)}_state_engine.pkl"
 
     scorer_out_base = args.model_out
+    output_prefix = _output_prefix(args.symbol, args.score_tf, run_id)
     if scorer_out_base is None:
-        scorer_out_base = args.model_dir / f"{_safe_symbol(args.symbol)}_event_scorer.pkl"
+        scorer_out_base = args.model_dir / f"{output_prefix}_event_scorer.pkl"
 
     connector = MT5Connector()
     fecha_inicio = pd.to_datetime(args.start)
@@ -2757,6 +2880,9 @@ def main() -> None:
             args=args,
             k_bars=k_bars,
             output_suffix=output_suffix,
+            output_prefix=output_prefix,
+            run_id=run_id,
+            config_path=config_path,
             detected_events=detected_events,
             event_config=event_config,
             df_score_ctx=df_score_ctx,
@@ -2787,6 +2913,10 @@ def main() -> None:
         _persist_research_outputs(
             model_dir=args.model_dir,
             symbol=args.symbol,
+            allow_tf=args.allow_tf,
+            score_tf=args.score_tf,
+            run_id=run_id,
+            config_path=config_path,
             grid_results=combined_grid,
             summary_payload=research_summary,
             research_cfg=research_cfg,

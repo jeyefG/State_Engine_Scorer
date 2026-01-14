@@ -67,9 +67,8 @@ def load_config(path: str | Path) -> dict[str, Any]:
     return data
 
 def _validate_config(config: dict[str, Any]) -> None:
-    symbol = config.get("symbol")
-    if not isinstance(symbol, str) or not symbol.strip():
-        raise ValueError("Config must include a non-empty 'symbol'.")
+    if "symbol" in config:
+        raise ValueError("Config must not define 'symbol'; provide symbol via CLI.")
 
     event_cfg = config.get("event_scorer", {})
     if event_cfg is None:

@@ -18,7 +18,6 @@ load_config = config_loader.load_config
 
 def test_deep_merge_overrides_nested_values() -> None:
     defaults = {
-        "symbol": "XAUUSD",
         "event_scorer": {
             "train_ratio": 0.8,
             "meta_policy": {"enabled": True, "meta_margin_min": 0.1, "meta_margin_max": 0.95},
@@ -35,9 +34,9 @@ def test_deep_merge_overrides_nested_values() -> None:
     assert merged["event_scorer"]["meta_policy"]["meta_margin_max"] == 0.95
 
 
-def test_load_config_validates_symbol(tmp_path: Path) -> None:
+def test_load_config_rejects_symbol_key(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps({"event_scorer": {"train_ratio": 0.8}}))
+    config_path.write_text(json.dumps({"symbol": "XAUUSD", "event_scorer": {"train_ratio": 0.8}}))
 
     with pytest.raises(ValueError, match="symbol"):
         load_config(config_path)
@@ -45,7 +44,6 @@ def test_load_config_validates_symbol(tmp_path: Path) -> None:
 
 def test_load_config_validates_meta_margin_bounds(tmp_path: Path) -> None:
     config = {
-        "symbol": "XAUUSD",
         "event_scorer": {"meta_policy": {"meta_margin_min": 0.9, "meta_margin_max": 0.5}},
     }
     config_path = tmp_path / "config.json"
@@ -57,7 +55,6 @@ def test_load_config_validates_meta_margin_bounds(tmp_path: Path) -> None:
 
 def test_load_config_allows_null_p10_min(tmp_path: Path) -> None:
     config = {
-        "symbol": "XAUUSD",
         "event_scorer": {
             "decision_thresholds": {"n_min": 100, "winrate_min": 0.5, "r_mean_min": 0.01, "p10_min": None}
         },
@@ -72,7 +69,6 @@ def test_load_config_allows_null_p10_min(tmp_path: Path) -> None:
 
 def test_load_config_allows_research_block(tmp_path: Path) -> None:
     config = {
-        "symbol": "XAUUSD",
         "event_scorer": {
             "research": {
                 "enabled": True,
@@ -93,7 +89,6 @@ def test_load_config_allows_research_block(tmp_path: Path) -> None:
 @pytest.mark.parametrize("anchor_hour", [0, 23])
 def test_load_config_accepts_valid_d1_anchor_hour(tmp_path: Path, anchor_hour: int) -> None:
     config = {
-        "symbol": "XAUUSD",
         "event_scorer": {"research": {"d1_anchor_hour": anchor_hour}},
     }
     config_path = tmp_path / "config.json"
@@ -107,7 +102,6 @@ def test_load_config_accepts_valid_d1_anchor_hour(tmp_path: Path, anchor_hour: i
 @pytest.mark.parametrize("anchor_hour", [-1, 24, "3", None])
 def test_load_config_rejects_invalid_d1_anchor_hour(tmp_path: Path, anchor_hour: object) -> None:
     config = {
-        "symbol": "XAUUSD",
         "event_scorer": {"research": {"d1_anchor_hour": anchor_hour}},
     }
     config_path = tmp_path / "config.json"
