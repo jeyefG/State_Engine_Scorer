@@ -1423,6 +1423,7 @@ def _run_training_for_k(
     research_cfg: dict,
 ) -> pd.DataFrame | None:
     logger = logging.getLogger("event_scorer")
+    research_enabled = research_mode and bool(research_cfg.get("enabled", False))
     print(
         "symbol={symbol} start={start} end={end} k_bars={k} reward_r={reward} sl_mult={sl} r_thr={thr} "
         "meta_policy={meta} include_transition={include_transition}".format(
