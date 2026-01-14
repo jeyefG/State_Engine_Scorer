@@ -714,6 +714,17 @@ def _month_bucket_series(events_index: pd.DatetimeIndex) -> pd.Series:
     return events_index.to_period("M").astype(str).rename("month_bucket")
 
 
+def _align_bucket_series(bucket: pd.Series, target_index: pd.Index, label: str) -> pd.Series:
+    if bucket.empty:
+        return pd.Series([], index=target_index, name=label, dtype="object")
+    if len(bucket) == len(target_index):
+        return pd.Series(bucket.to_numpy(), index=target_index, name=label)
+    if bucket.index.is_unique:
+        return bucket.reindex(target_index)
+    deduped = bucket[~bucket.index.duplicated(keep="last")]
+    return deduped.reindex(target_index)
+
+
 def _research_fail_reason(row: pd.Series, thresholds: argparse.Namespace) -> tuple[bool, str]:
     reasons: list[str] = []
     for col in ("n", "winrate", "r_mean", "p10"):
@@ -761,8 +772,16 @@ def _build_research_grid_results(
     if events_df.empty:
         return pd.DataFrame(columns=columns)
     events_grid = events_df.copy()
-    events_grid["session_bucket"] = session_bucket.reindex(events_grid.index).fillna("UNKNOWN")
-    events_grid["month_bucket"] = month_bucket.reindex(events_grid.index).fillna("UNKNOWN")
+    events_grid["session_bucket"] = _align_bucket_series(
+        session_bucket,
+        events_grid.index,
+        "session_bucket",
+    ).fillna("UNKNOWN")
+    events_grid["month_bucket"] = _align_bucket_series(
+        month_bucket,
+        events_grid.index,
+        "month_bucket",
+    ).fillna("UNKNOWN")
     grouped = events_grid.groupby(
         ["state_label", "family_id", "session_bucket", "month_bucket"],
         observed=True,
@@ -1423,6 +1442,7 @@ def _run_training_for_k(
     research_cfg: dict,
 ) -> pd.DataFrame | None:
     logger = logging.getLogger("event_scorer")
+    research_enabled = research_mode and bool(research_cfg.get("enabled", False))
     print(
         "symbol={symbol} start={start} end={end} k_bars={k} reward_r={reward} sl_mult={sl} r_thr={thr} "
         "meta_policy={meta} include_transition={include_transition}".format(
