@@ -173,7 +173,8 @@ def build_m5_context(
     if symbol is not None and "symbol" not in df_m5.columns:
         df_m5 = df_m5.copy()
         df_m5["symbol"] = symbol
-    h1_ctx = outputs[["state_hat", "margin"]].rename(
+    ctx_cols = [col for col in outputs.columns if col.startswith("ctx_")]
+    h1_ctx = outputs[["state_hat", "margin", *ctx_cols]].rename(
         columns={"state_hat": "state_hat_H1", "margin": "margin_H1"}
     )
     h1_ctx = h1_ctx.join(gating).shift(1).sort_index()

@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from state_engine.features import FeatureConfig
+from state_engine.context_features import build_context_features
 from state_engine.gating import GatingPolicy
 from state_engine.labels import StateLabels
 from state_engine.model import StateEngineModel, StateEngineModelConfig
@@ -348,6 +349,15 @@ def main() -> None:
         for line in format_quality_diagnostics(diagnostics):
             logger.info(line)
 
+    ctx_features = build_context_features(
+        ohlcv,
+        outputs,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+    )
+    if not ctx_features.empty:
+        outputs = outputs.join(ctx_features)
+
     # Extra reporting helpers
     state_hat_dist = class_distribution(outputs["state_hat"].to_numpy(), label_order)
     q_list = [0, 50, 75, 90, 95, 99, 100]
@@ -356,7 +366,7 @@ def main() -> None:
 
     stage_start = step("gating")
     gating_policy = GatingPolicy()
-    gating = gating_policy.apply(outputs, full_features)
+    gating = gating_policy.apply(outputs, full_features.join(ctx_features, how="left"))
     allow_any = gating.any(axis=1)
 
     # EV estructural (diagnóstico): ret_struct basado en rango direccional futuro
@@ -465,6 +475,24 @@ def main() -> None:
     elapsed_gating = step_done(stage_start)
     logger.info("gating_allow_rate=%.2f%% elapsed=%.2fs", gating_allow_rate * 100, elapsed_gating)
     logger.info("gating_thresholds=%s", asdict(gating_policy.thresholds))
+
+    if not ctx_features.empty:
+        allow_cols = [col for col in gating.columns if col.startswith("ALLOW_")]
+        debug_frame = (
+            outputs[
+                [
+                    "state_hat",
+                    "margin",
+                    "ctx_session_bucket",
+                    "ctx_state_age",
+                    "ctx_dist_vwap_atr",
+                ]
+            ]
+            .join(full_features[["BreakMag", "ReentryCount"]], how="left")
+            .join(gating[allow_cols], how="left")
+        )
+        print("\n[CTX DIAGNOSTIC TABLE] last_rows=10")
+        print(debug_frame.tail(10).to_string())
 
     stage_start = step("save_model")
     metadata = {
