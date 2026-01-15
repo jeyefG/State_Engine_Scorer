@@ -74,25 +74,35 @@ class GatingPolicy:
         outputs: pd.DataFrame,
         features: pd.DataFrame | None,
     ) -> pd.Series:
+        def _get_col(column: str) -> pd.Series | None:
+            if features is not None and column in features.columns:
+                return features[column]
+            if column in outputs.columns:
+                return outputs[column]
+            return None
+
         th = self.thresholds
         if th.allowed_sessions is not None:
-            if "ctx_session_bucket" in outputs.columns:
+            series = _get_col("ctx_session_bucket")
+            if series is not None:
                 allowed = {str(val) for val in th.allowed_sessions}
-                ctx_pass &= outputs["ctx_session_bucket"].astype(str).isin(allowed)
+                ctx_pass &= series.astype(str).isin(allowed)
         if th.state_age_min is not None:
-            if "ctx_state_age" in outputs.columns:
-                ctx_pass &= outputs["ctx_state_age"] >= th.state_age_min
+            series = _get_col("ctx_state_age")
+            if series is not None:
+                ctx_pass &= series >= th.state_age_min
         if th.state_age_max is not None:
-            if "ctx_state_age" in outputs.columns:
-                ctx_pass &= outputs["ctx_state_age"] <= th.state_age_max
+            series = _get_col("ctx_state_age")
+            if series is not None:
+                ctx_pass &= series <= th.state_age_max
         if th.dist_vwap_atr_min is not None:
-            source = outputs if "ctx_dist_vwap_atr" in outputs.columns else features
-            if source is not None and "ctx_dist_vwap_atr" in source.columns:
-                ctx_pass &= source["ctx_dist_vwap_atr"] >= th.dist_vwap_atr_min
+            series = _get_col("ctx_dist_vwap_atr")
+            if series is not None:
+                ctx_pass &= series >= th.dist_vwap_atr_min
         if th.dist_vwap_atr_max is not None:
-            source = outputs if "ctx_dist_vwap_atr" in outputs.columns else features
-            if source is not None and "ctx_dist_vwap_atr" in source.columns:
-                ctx_pass &= source["ctx_dist_vwap_atr"] <= th.dist_vwap_atr_max
+            series = _get_col("ctx_dist_vwap_atr")
+            if series is not None:
+                ctx_pass &= series <= th.dist_vwap_atr_max
         return ctx_pass
 
 
