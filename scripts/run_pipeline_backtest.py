@@ -83,7 +83,8 @@ def build_h1_context(
     features = feature_engineer.training_features(full_features)
     outputs = state_model.predict_outputs(features)
     allows = gating.apply(outputs, features=full_features)
-    ctx = pd.concat([outputs[["state_hat", "margin"]], allows], axis=1)
+    ctx_cols = [col for col in outputs.columns if col.startswith("ctx_")]
+    ctx = pd.concat([outputs[["state_hat", "margin", *ctx_cols]], allows], axis=1)
     return ctx.shift(1)
 
 

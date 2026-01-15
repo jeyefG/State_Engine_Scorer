@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from typing import Iterable
+
 import pandas as pd
 
 from .labels import StateLabels
@@ -16,6 +18,11 @@ class GatingThresholds:
     transition_margin_min: float = 0.10
     transition_breakmag_min: float = 0.25
     transition_reentry_min: float = 1.0
+    allowed_sessions: Iterable[str] | None = None
+    state_age_min: int | None = None
+    state_age_max: int | None = None
+    dist_vwap_atr_min: float | None = None
+    dist_vwap_atr_max: float | None = None
 
 
 class GatingPolicy:
@@ -34,6 +41,8 @@ class GatingPolicy:
         th = self.thresholds
         state_hat = outputs["state_hat"]
         margin = outputs["margin"]
+        ctx_filters_pass = pd.Series(True, index=outputs.index)
+        ctx_filters_pass = self._apply_context_filters(ctx_filters_pass, outputs, features)
         allow_trend_pullback = (state_hat == StateLabels.TREND) & (margin >= th.trend_margin_min)
         allow_trend_continuation = (state_hat == StateLabels.TREND) & (margin >= th.trend_margin_min)
         allow_balance_fade = (state_hat == StateLabels.BALANCE) & (margin >= th.balance_margin_min)
@@ -51,13 +60,50 @@ class GatingPolicy:
 
         return pd.DataFrame(
             {
-                "ALLOW_trend_pullback": allow_trend_pullback.astype(int),
-                "ALLOW_trend_continuation": allow_trend_continuation.astype(int),
-                "ALLOW_balance_fade": allow_balance_fade.astype(int),
-                "ALLOW_transition_failure": allow_transition_failure.astype(int),
+                "ALLOW_trend_pullback": (allow_trend_pullback & ctx_filters_pass).astype(int),
+                "ALLOW_trend_continuation": (allow_trend_continuation & ctx_filters_pass).astype(int),
+                "ALLOW_balance_fade": (allow_balance_fade & ctx_filters_pass).astype(int),
+                "ALLOW_transition_failure": (allow_transition_failure & ctx_filters_pass).astype(int),
             },
             index=outputs.index,
         )
+
+    def _apply_context_filters(
+        self,
+        ctx_pass: pd.Series,
+        outputs: pd.DataFrame,
+        features: pd.DataFrame | None,
+    ) -> pd.Series:
+        def _get_col(column: str) -> pd.Series | None:
+            if features is not None and column in features.columns:
+                return features[column]
+            if column in outputs.columns:
+                return outputs[column]
+            return None
+
+        th = self.thresholds
+        if th.allowed_sessions is not None:
+            series = _get_col("ctx_session_bucket")
+            if series is not None:
+                allowed = {str(val) for val in th.allowed_sessions}
+                ctx_pass &= series.astype(str).isin(allowed)
+        if th.state_age_min is not None:
+            series = _get_col("ctx_state_age")
+            if series is not None:
+                ctx_pass &= series >= th.state_age_min
+        if th.state_age_max is not None:
+            series = _get_col("ctx_state_age")
+            if series is not None:
+                ctx_pass &= series <= th.state_age_max
+        if th.dist_vwap_atr_min is not None:
+            series = _get_col("ctx_dist_vwap_atr")
+            if series is not None:
+                ctx_pass &= series >= th.dist_vwap_atr_min
+        if th.dist_vwap_atr_max is not None:
+            series = _get_col("ctx_dist_vwap_atr")
+            if series is not None:
+                ctx_pass &= series <= th.dist_vwap_atr_max
+        return ctx_pass
 
 
 __all__ = ["GatingThresholds", "GatingPolicy"]
