@@ -22,6 +22,7 @@ class ContextFeatureConfig:
     atr_window: int = 14
     vwap_window: int = 50
     vwap_reset_mode: str | None = None
+    vwap_day_anchor: str | None = None
     eps: float = 1e-9
 
 
@@ -35,6 +36,15 @@ def _normalize_timeframe(timeframe: str | None) -> str:
     if timeframe is None:
         return ""
     return str(timeframe).upper()
+
+
+def _resolve_vwap_day_anchor(symbol: str | None, anchor: str | None) -> str:
+    if anchor:
+        return anchor
+    normalized_symbol = _normalize_symbol(symbol)
+    if normalized_symbol.startswith("XAUUSD"):
+        return "ny_rollover_17"
+    return "server_midnight"
 
 
 def is_context_enabled(symbol: str | None, timeframe: str | None) -> bool:
@@ -98,29 +108,81 @@ def _resolve_vwap_series(
     *,
     vwap_window: int,
     reset_mode: str | None,
+    vwap_day_anchor: str,
 ) -> pd.Series | None:
-    from .events import _compute_vwap, _resolve_vwap_reset_mode
-
     vwap_col = _resolve_vwap_column(ohlcv)
     if vwap_col is not None:
-        return pd.to_numeric(ohlcv[vwap_col], errors="coerce")
+        provided = pd.to_numeric(ohlcv[vwap_col], errors="coerce")
+        if provided.notna().any():
+            return provided
 
-    effective_mode = _resolve_vwap_reset_mode(ohlcv, reset_mode)
     _LOGGER.warning(
-        "VWAP not provided in ohlcv; computing proxy VWAP (mode=daily, window=50)."
+        "VWAP not provided in ohlcv; computing day-anchor VWAP (anchor=%s, window=%s).",
+        vwap_day_anchor,
+        vwap_window,
     )
     _LOGGER.debug("ohlcv.columns=%s", list(ohlcv.columns))
-    try:
-        vwap = _compute_vwap(
-            ohlcv,
-            vwap_col="vwap",
-            reset_mode=effective_mode,
-            vwap_window=vwap_window,
-        )
-    except ValueError as exc:
-        _LOGGER.warning("VWAP missing for ctx_dist_vwap_atr; skipping (%s).", exc)
+    vwap = _compute_standard_vwap(ohlcv, day_anchor=vwap_day_anchor)
+    if vwap is None:
         return None
     return pd.to_numeric(vwap, errors="coerce")
+
+
+def _resolve_volume_series(ohlcv: pd.DataFrame) -> pd.Series | None:
+    real_volume = None
+    if "real_volume" in ohlcv.columns:
+        real_volume = pd.to_numeric(ohlcv["real_volume"], errors="coerce")
+    tick_volume = None
+    if "tick_volume" in ohlcv.columns:
+        tick_volume = pd.to_numeric(ohlcv["tick_volume"], errors="coerce")
+    if tick_volume is None and real_volume is None:
+        return None
+    if real_volume is None:
+        return tick_volume
+    if tick_volume is None:
+        return real_volume
+    return pd.Series(
+        np.where(real_volume > 0, real_volume, tick_volume),
+        index=ohlcv.index,
+    )
+
+
+def _day_id(index: pd.DatetimeIndex, anchor: str) -> pd.Series:
+    if anchor == "server_midnight":
+        day = index.normalize()
+        return pd.Series(day, index=index)
+    if anchor == "utc_midnight":
+        if index.tz is None:
+            localized = index.tz_localize("UTC")
+        else:
+            localized = index.tz_convert("UTC")
+        day = localized.normalize().tz_localize(None)
+        return pd.Series(day, index=index)
+    if anchor == "ny_rollover_17":
+        if index.tz is None:
+            localized = index.tz_localize("UTC")
+        else:
+            localized = index.tz_convert("UTC")
+        ny_time = localized.tz_convert("America/New_York")
+        day = (ny_time - pd.Timedelta(hours=17)).normalize().tz_localize(None)
+        return pd.Series(day, index=index)
+    raise ValueError(f"Unknown vwap_day_anchor: {anchor}")
+
+
+def _compute_standard_vwap(ohlcv: pd.DataFrame, *, day_anchor: str) -> pd.Series | None:
+    vol = _resolve_volume_series(ohlcv)
+    if vol is None:
+        _LOGGER.warning("VWAP missing for ctx_dist_vwap_atr; skipping (no volume column).")
+        return None
+    high = pd.to_numeric(ohlcv["high"], errors="coerce")
+    low = pd.to_numeric(ohlcv["low"], errors="coerce")
+    close = pd.to_numeric(ohlcv["close"], errors="coerce")
+    tp = (high + low + close) / 3.0
+    day_id = _day_id(ohlcv.index, day_anchor)
+    pv = tp * vol
+    cum_pv = pv.groupby(day_id).cumsum()
+    cum_vol = vol.groupby(day_id).cumsum().replace(0, np.nan)
+    return (cum_pv / cum_vol).rename("vwap")
 
 
 def _resolve_atr_series(ohlcv: pd.DataFrame, *, window: int) -> pd.Series:
@@ -135,16 +197,17 @@ def log_vwap_validation(
     vwap: pd.Series | None,
     atr: pd.Series | None,
     group_key: pd.Series | None,
+    day_id: pd.Series | None,
     source: str,
-    reset_mode: str | None,
+    anchor: str | None,
     window: int,
 ) -> None:
     """Log sanity checks for VWAP-derived distances."""
     if vwap is None:
         _LOGGER.info(
-            "VWAP_VALIDATION source=%s reset_mode=%s window=%s vwap_nan_pct=100.00 atr_missing",
+            "VWAP_VALIDATION source=%s anchor=%s window=%s vwap_nan_pct=100.00 atr_missing",
             source,
-            reset_mode,
+            anchor,
             window,
         )
         return
@@ -152,9 +215,9 @@ def log_vwap_validation(
     vwap_nan_pct = vwap.isna().mean() * 100.0
     if atr is None or atr.isna().all():
         _LOGGER.info(
-            "VWAP_VALIDATION source=%s reset_mode=%s window=%s vwap_nan_pct=%.2f atr_missing",
+            "VWAP_VALIDATION source=%s anchor=%s window=%s vwap_nan_pct=%.2f atr_missing",
             source,
-            reset_mode,
+            anchor,
             window,
             vwap_nan_pct,
         )
@@ -168,10 +231,10 @@ def log_vwap_validation(
         dist, [0.5, 0.9, 0.99, 1.0]
     )
     _LOGGER.info(
-        "VWAP_VALIDATION source=%s reset_mode=%s window=%s vwap_nan_pct=%.2f "
+        "VWAP_VALIDATION source=%s anchor=%s window=%s vwap_nan_pct=%.2f "
         "dist_nan_pct=%.2f dist_p50=%.4f dist_p90=%.4f dist_p99=%.4f dist_max=%.4f",
         source,
-        reset_mode,
+        anchor,
         window,
         vwap_nan_pct,
         dist_nan_pct,
@@ -180,6 +243,34 @@ def log_vwap_validation(
         dist_p99,
         dist_max,
     )
+
+    if day_id is not None:
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        day_low = low.groupby(day_id).transform("min")
+        day_high = high.groupby(day_id).transform("max")
+        outside = (vwap < day_low) | (vwap > day_high)
+        per_day = outside.groupby(day_id).mean()
+        pct_outside = float(per_day.mean() * 100.0) if not per_day.empty else 0.0
+        tp = (high + low + close) / 3.0
+        first_mask = day_id.ne(day_id.shift(1))
+        vwap_first = vwap[first_mask]
+        tp_first = tp[first_mask]
+        atr_first = atr[first_mask]
+        denom_first = np.maximum(atr_first.to_numpy(), np.finfo(float).eps)
+        dist_first = (vwap_first - tp_first).abs() / denom_first
+        if len(dist_first):
+            p50_first, p90_first = np.nanquantile(dist_first, [0.5, 0.9])
+        else:
+            p50_first, p90_first = 0.0, 0.0
+        _LOGGER.info(
+            "VWAP_DAY_VALIDATION anchor=%s pct_outside_day_range=%.2f "
+            "abs_vwap_first_tp_first_atr_p50=%.4f abs_vwap_first_tp_first_atr_p90=%.4f",
+            anchor,
+            pct_outside,
+            p50_first,
+            p90_first,
+        )
 
     if group_key is None:
         return
@@ -216,15 +307,18 @@ def compute_dist_vwap_atr(
     ohlcv: pd.DataFrame,
     *,
     atr_window: int,
-    vwap_window: int,
-    vwap_reset_mode: str | None,
+    vwap_window: int = 50,
+    vwap_reset_mode: str | None = None,
+    vwap_day_anchor: str | None = None,
     eps: float,
 ) -> pd.Series:
     """Compute absolute distance to VWAP normalized by ATR."""
+    anchor = _resolve_vwap_day_anchor(None, vwap_day_anchor)
     vwap = _resolve_vwap_series(
         ohlcv,
         vwap_window=vwap_window,
         reset_mode=vwap_reset_mode,
+        vwap_day_anchor=anchor,
     )
     if vwap is None:
         return pd.Series(np.nan, index=ohlcv.index, name="ctx_dist_vwap_atr")
@@ -244,16 +338,19 @@ def build_context_features(
     config: ContextFeatureConfig | None = None,
 ) -> pd.DataFrame:
     """Build ctx_* features after state_hat/margin are available."""
-    cfg = config or ContextFeatureConfig()
+    cfg = config or ContextFeatureConfig(vwap_day_anchor=_resolve_vwap_day_anchor(symbol, None))
     if not is_context_enabled(symbol, timeframe):
         return pd.DataFrame(index=outputs.index)
 
     session_bucket = compute_session_bucket(outputs.index)
     state_age = compute_state_age(outputs["state_hat"], max_age=cfg.max_state_age)
+    anchor = _resolve_vwap_day_anchor(symbol, cfg.vwap_day_anchor)
+    day_id = _day_id(ohlcv.index, anchor)
     vwap = _resolve_vwap_series(
         ohlcv,
         vwap_window=cfg.vwap_window,
         reset_mode=cfg.vwap_reset_mode,
+        vwap_day_anchor=anchor,
     )
     atr = _resolve_atr_series(ohlcv, window=cfg.atr_window)
     if vwap is None:
@@ -264,19 +361,27 @@ def build_context_features(
         dist = (close - vwap).abs() / denom
         dist_vwap_atr = pd.Series(dist, index=ohlcv.index, name="ctx_dist_vwap_atr")
     dist_vwap_atr = dist_vwap_atr.reindex(outputs.index)
-    vwap_source = "provided" if _resolve_vwap_column(ohlcv) else "proxy_daily_50"
+    vwap_col = _resolve_vwap_column(ohlcv)
+    provided_valid = False
+    if vwap_col is not None:
+        provided_valid = pd.to_numeric(ohlcv[vwap_col], errors="coerce").notna().any()
+    vwap_source = "provided" if provided_valid else "day_anchor_std"
     vwap_source = pd.Series(vwap_source, index=outputs.index, name="ctx_vwap_source")
+    vwap_anchor = pd.Series(anchor, index=outputs.index, name="ctx_vwap_anchor")
     log_vwap_validation(
         ohlcv,
         vwap,
         atr,
         session_bucket.reindex(ohlcv.index),
+        day_id,
         vwap_source.iloc[0],
-        cfg.vwap_reset_mode,
+        anchor,
         cfg.vwap_window,
     )
 
-    return pd.concat([session_bucket, state_age, dist_vwap_atr, vwap_source], axis=1)
+    return pd.concat(
+        [session_bucket, state_age, dist_vwap_atr, vwap_source, vwap_anchor], axis=1
+    )
 
 
 __all__ = [
