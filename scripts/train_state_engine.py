@@ -27,7 +27,7 @@ import pandas as pd
 from state_engine.features import FeatureConfig
 from state_engine.context_features import build_context_features
 from state_engine.config_loader import load_config
-from state_engine.gating import GatingPolicy
+from state_engine.gating import GatingPolicy, apply_allow_context_filters
 from state_engine.labels import StateLabels
 from state_engine.model import StateEngineModel, StateEngineModelConfig
 from state_engine.mt5_connector import MT5Connector
@@ -325,6 +325,20 @@ def _load_diagnostic_table_config(symbol: str, logger: logging.Logger) -> dict[s
     if diagnostic_cfg is None or not isinstance(diagnostic_cfg, dict):
         return {}
     return diagnostic_cfg
+
+
+def _load_symbol_config(symbol: str, logger: logging.Logger) -> dict[str, Any]:
+    config_path = Path("configs") / "symbols" / f"{symbol}.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        logger.warning("symbol config load failed for %s: %s", symbol, exc)
+        return {}
+    if not isinstance(config, dict):
+        return {}
+    return config
 
 
 def _print_block(
@@ -1103,6 +1117,8 @@ def main() -> None:
             "ctx_features empty or missing ctx_* columns; context gating filters will be inactive."
         )
 
+    symbol_config = _load_symbol_config(args.symbol, logger)
+
     # Extra reporting helpers
     state_hat_dist = class_distribution(outputs["state_hat"].to_numpy(), label_order)
     q_list = [0, 50, 75, 90, 95, 99, 100]
@@ -1119,6 +1135,25 @@ def main() -> None:
     gating_policy = GatingPolicy()
     features_for_gating = full_features.join(ctx_features, how="left")
     gating = gating_policy.apply(outputs, features_for_gating)
+    allow_context_frame = gating.copy()
+    context_cols = {}
+    if "ctx_session_bucket" in ctx_features.columns:
+        context_cols["session_bucket"] = ctx_features["ctx_session_bucket"]
+    if "ctx_state_age" in ctx_features.columns:
+        context_cols["state_age"] = ctx_features["ctx_state_age"]
+    if "ctx_dist_vwap_atr" in ctx_features.columns:
+        context_cols["dist_vwap_atr"] = ctx_features["ctx_dist_vwap_atr"]
+    if context_cols:
+        allow_context_frame = allow_context_frame.join(
+            pd.DataFrame(context_cols, index=allow_context_frame.index)
+        )
+    feature_cols = [col for col in ["BreakMag", "ReentryCount"] if col in full_features.columns]
+    if feature_cols:
+        allow_context_frame = allow_context_frame.join(
+            full_features[feature_cols].reindex(allow_context_frame.index)
+        )
+    allow_cols = list(gating.columns)
+    gating = apply_allow_context_filters(allow_context_frame, symbol_config, logger)[allow_cols]
     allow_any = gating.any(axis=1)
 
     # EV estructural (diagnóstico): ret_struct basado en rango direccional futuro

@@ -30,7 +30,7 @@ from sklearn.metrics import roc_auc_score
 
 from state_engine.events import EventDetectionConfig, detect_events, label_events
 from state_engine.features import FeatureConfig, FeatureEngineer
-from state_engine.gating import GatingPolicy
+from state_engine.gating import GatingPolicy, apply_allow_context_filters
 from state_engine.model import StateEngineModel
 from state_engine.mt5_connector import MT5Connector
 from state_engine.labels import StateLabels
@@ -212,11 +212,21 @@ def build_h1_context(
     state_model: StateEngineModel,
     feature_engineer: FeatureEngineer,
     gating: GatingPolicy,
+    symbol_cfg: dict | None,
+    logger: logging.Logger,
 ) -> pd.DataFrame:
     full_features = feature_engineer.compute_features(ohlcv_h1)
     features = feature_engineer.training_features(full_features)
     outputs = state_model.predict_outputs(features)
     allows = gating.apply(outputs, features=full_features)
+    allow_context_frame = allows.copy()
+    feature_cols = [col for col in ["BreakMag", "ReentryCount"] if col in full_features.columns]
+    if feature_cols:
+        allow_context_frame = allow_context_frame.join(
+            full_features[feature_cols].reindex(allow_context_frame.index)
+        )
+    allow_cols = list(allows.columns)
+    allows = apply_allow_context_filters(allow_context_frame, symbol_cfg, logger)[allow_cols]
     ctx_cols = [col for col in outputs.columns if col.startswith("ctx_")]
     ctx = pd.concat([outputs[["state_hat", "margin", *ctx_cols]], allows], axis=1)
     ctx = ctx.shift(1)
@@ -2840,7 +2850,7 @@ def main() -> None:
 
     feature_engineer = FeatureEngineer(FeatureConfig())
     gating = GatingPolicy()
-    ctx_h1 = build_h1_context(ohlcv_h1, state_model, feature_engineer, gating)
+    ctx_h1 = build_h1_context(ohlcv_h1, state_model, feature_engineer, gating, config_payload, logger)
 
     df_score_ctx = merge_allow_score(ctx_h1, ohlcv_score)
     if "atr_14" not in df_score_ctx.columns:
