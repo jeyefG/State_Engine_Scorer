@@ -1317,13 +1317,6 @@ def main() -> None:
     # ALLOW final (cualquier regla true)
     last_allow = bool(allow_any.loc[last_idx]) if last_idx in allow_any.index else False
     
-    # Estado y margen de la última vela
-    last_state_hat = int(outputs.loc[last_idx, "state_hat"]) if last_idx in outputs.index else None
-    last_margin = float(outputs.loc[last_idx, "margin"]) if last_idx in outputs.index else None
-    
-    # Reglas específicas que dispararon en la última vela (diagnóstico)
-    last_rules = [c for c in gating.columns if bool(gating.loc[last_idx, c])] if last_idx in gating.index else []
-
     gating_allow_rate = float(allow_any.mean()) if len(gating) else 0.0
     gating_block_rate = 1.0 - gating_allow_rate
     elapsed_gating = step_done(stage_start)
@@ -1343,6 +1336,18 @@ def main() -> None:
         )
 
     if is_debug:
+        table_class = rich_modules["Table"] if use_rich and console else None
+
+        def _emit_table_debug(title: str, df: pd.DataFrame, max_rows: int | None = None) -> None:
+            _print_block(
+                title,
+                df,
+                console=console if use_rich else None,
+                table_class=table_class,
+                logger=logger,
+                max_rows=max_rows,
+            )
+
         if ctx_cols:
             allow_cols = [col for col in gating.columns if col.startswith("ALLOW_")]
             debug_frame = (
@@ -1360,7 +1365,7 @@ def main() -> None:
         allow_config_rows = _allow_filter_config_rows(symbol_config, "ALLOW_transition_failure")
         if allow_config_rows:
             allow_config_df = pd.DataFrame(allow_config_rows)
-            _emit_table("GATING_CONFIG_EFFECTIVE", allow_config_df)
+            _emit_table_debug("GATING_CONFIG_EFFECTIVE", allow_config_df)
         if isinstance(transition_cfg, dict) and transition_cfg:
             allow_filter_counts = _allow_context_filter_counts(
                 allow_context_frame,
@@ -1369,7 +1374,7 @@ def main() -> None:
                 logger,
             )
             if not allow_filter_counts.empty:
-                _emit_table("ALLOW_transition_context_counts", allow_filter_counts)
+                _emit_table_debug("ALLOW_transition_context_counts", allow_filter_counts)
 
     stage_start = step("save_model")
     metadata = {
