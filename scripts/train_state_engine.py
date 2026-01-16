@@ -26,6 +26,7 @@ import pandas as pd
 
 from state_engine.features import FeatureConfig
 from state_engine.context_features import build_context_features
+from state_engine.config_loader import load_config
 from state_engine.gating import GatingPolicy
 from state_engine.labels import StateLabels
 from state_engine.model import StateEngineModel, StateEngineModelConfig
@@ -260,6 +261,72 @@ def _split_time_terciles(index: pd.DatetimeIndex) -> list[pd.Series]:
     ]
 
 
+def _format_bin_edge(value: float) -> str:
+    if value == float("inf"):
+        return "inf"
+    if value == -float("inf"):
+        return "-inf"
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _build_range_labels(bins: list[float]) -> list[str]:
+    labels = []
+    for left, right in zip(bins[:-1], bins[1:]):
+        if left == -float("inf"):
+            labels.append(f"<={_format_bin_edge(right)}")
+        elif right == float("inf"):
+            labels.append(f">{_format_bin_edge(left)}")
+        else:
+            labels.append(f"{_format_bin_edge(left)}-{_format_bin_edge(right)}")
+    return labels
+
+
+def _coerce_bins(
+    override: list[float] | tuple[float, ...] | None,
+    fallback: tuple[float, ...],
+    fallback_labels: tuple[str, ...],
+) -> tuple[tuple[float, ...], tuple[str, ...]]:
+    if not override:
+        return fallback, fallback_labels
+    bins = tuple(float(x) for x in override)
+    labels = tuple(_build_range_labels(list(bins)))
+    return bins, labels
+
+
+def _format_rescue_table(
+    df: pd.DataFrame,
+    *,
+    column_map: dict[str, str],
+    ordered_columns: list[str],
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    df = df.rename(columns=column_map)
+    available_cols = [col for col in ordered_columns if col in df.columns]
+    df = df[available_cols].copy()
+    float_cols = [col for col in ["ev", "p10", "p50", "p90", "delta", "pct_state"] if col in df.columns]
+    if float_cols:
+        df[float_cols] = df[float_cols].round(6)
+    return df
+
+
+def _load_diagnostic_table_config(symbol: str, logger: logging.Logger) -> dict[str, Any]:
+    config_path = Path("configs") / "symbols" / f"{symbol}.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        logger.warning("diagnostic_tables config load failed for %s: %s", symbol, exc)
+        return {}
+    diagnostic_cfg = config.get("diagnostic_tables", {})
+    if diagnostic_cfg is None or not isinstance(diagnostic_cfg, dict):
+        return {}
+    return diagnostic_cfg
+
+
 def _print_block(
     title: str,
     df: pd.DataFrame,
@@ -330,13 +397,13 @@ def _rescue_scan_tables(
     pct_total = (n_state / total_rows * 100.0) if total_rows else 0.0
 
     if "session_bucket" in state_df.columns:
-        state_df["session_bucket"] = state_df["session_bucket"].fillna("ALL")
+        state_df["session_bucket"] = state_df["session_bucket"].fillna("UNKNOWN")
     else:
-        logger.info("rescue_scan target=%s session_bucket missing; using ALL", target_state)
-        state_df["session_bucket"] = "ALL"
+        logger.info("rescue_scan target=%s session_bucket missing; using UNKNOWN", target_state)
+        state_df["session_bucket"] = "UNKNOWN"
 
     if "state_age" in state_df.columns:
-        state_df["state_age_bin"] = pd.cut(
+        state_df["state_age_bucket"] = pd.cut(
             pd.to_numeric(state_df["state_age"], errors="coerce"),
             bins=list(age_bins),
             labels=list(age_labels),
@@ -344,10 +411,10 @@ def _rescue_scan_tables(
         ).astype(object).fillna("MISSING")
     else:
         logger.info("rescue_scan target=%s state_age missing; using MISSING", target_state)
-        state_df["state_age_bin"] = "MISSING"
+        state_df["state_age_bucket"] = "MISSING"
 
     if "dist_vwap_atr" in state_df.columns:
-        state_df["dist_vwap_atr_bin"] = pd.cut(
+        state_df["dist_vwap_atr_bucket"] = pd.cut(
             pd.to_numeric(state_df["dist_vwap_atr"], errors="coerce"),
             bins=list(dist_bins),
             labels=list(dist_labels),
@@ -355,37 +422,37 @@ def _rescue_scan_tables(
         ).astype(object).fillna("MISSING")
     else:
         logger.info("rescue_scan target=%s dist_vwap_atr missing; using MISSING", target_state)
-        state_df["dist_vwap_atr_bin"] = "MISSING"
+        state_df["dist_vwap_atr_bucket"] = "MISSING"
 
     if "ATR_Ratio" in state_df.columns and state_df["ATR_Ratio"].notna().any():
-        state_df["atr_ratio_bin"] = pd.cut(
+        state_df["atr_ratio_bucket"] = pd.cut(
             pd.to_numeric(state_df["ATR_Ratio"], errors="coerce"),
             bins=list(atr_ratio_bins),
             labels=list(atr_ratio_labels),
             include_lowest=True,
         ).astype(object).fillna("MISSING")
     else:
-        state_df["atr_ratio_bin"] = "MISSING"
+        state_df["atr_ratio_bucket"] = "MISSING"
 
     if "BreakMag" in state_df.columns and state_df["BreakMag"].notna().any():
-        state_df["break_mag_bin"] = pd.cut(
+        state_df["breakmag_bucket"] = pd.cut(
             pd.to_numeric(state_df["BreakMag"], errors="coerce"),
             bins=list(break_mag_bins),
             labels=list(break_mag_labels),
             include_lowest=True,
         ).astype(object).fillna("MISSING")
     else:
-        state_df["break_mag_bin"] = "MISSING"
+        state_df["breakmag_bucket"] = "MISSING"
 
     if "ReentryCount" in state_df.columns and state_df["ReentryCount"].notna().any():
-        state_df["reentry_count_bin"] = pd.cut(
+        state_df["reentry_bucket"] = pd.cut(
             pd.to_numeric(state_df["ReentryCount"], errors="coerce"),
             bins=list(reentry_bins),
             labels=list(reentry_labels),
             include_lowest=True,
         ).astype(object).fillna("MISSING")
     else:
-        state_df["reentry_count_bin"] = "MISSING"
+        state_df["reentry_bucket"] = "MISSING"
 
     composition_rows = [
         {
@@ -436,19 +503,22 @@ def _rescue_scan_tables(
     axes_map = {
         "BALANCE": [
             "session_bucket",
-            "state_age_bin",
-            "dist_vwap_atr_bin",
-            "atr_ratio_bin",
+            "state_age_bucket",
+            "dist_vwap_atr_bucket",
+            "atr_ratio_bucket",
         ],
         "TRANSITION": [
             "session_bucket",
-            "break_mag_bin",
-            "reentry_count_bin",
-            "state_age_bin",
-            "dist_vwap_atr_bin",
+            "breakmag_bucket",
+            "reentry_bucket",
+            "state_age_bucket",
+            "dist_vwap_atr_bucket",
         ],
     }
-    candidate_axes = axes_map.get(target_state, ["session_bucket", "state_age_bin", "dist_vwap_atr_bin"])
+    candidate_axes = axes_map.get(
+        target_state,
+        ["session_bucket", "state_age_bucket", "dist_vwap_atr_bucket"],
+    )
     candidate_axes = [
         axis
         for axis in candidate_axes
@@ -515,12 +585,63 @@ def _rescue_scan_tables(
         grid_extended = grid_extended.sort_values(
             by=["pct_state", "n_samples"], ascending=[False, False]
         )
-    _emit(f"{target_state}_RESCUE_GRID_EXTENDED", grid_extended, max_rows=top_k)
+    column_map = {
+        "axes": "axis",
+        "session_bucket": "ses",
+        "state_age_bucket": "age",
+        "dist_vwap_atr_bucket": "dvwap",
+        "breakmag_bucket": "breakmag",
+        "reentry_bucket": "reentry",
+        "atr_ratio_bucket": "atr_bucket",
+        "n_samples": "n",
+        "pct_state": "pct_state",
+        "ev_mean": "ev",
+        "delta_vs_state": "delta",
+        "stability_splits": "stable_n",
+    }
+    if target_state == "TRANSITION":
+        ordered_columns = [
+            "axis",
+            "ses",
+            "age",
+            "dvwap",
+            "breakmag",
+            "reentry",
+            "n",
+            "pct_state",
+            "ev",
+            "p10",
+            "p50",
+            "p90",
+            "delta",
+            "stable_n",
+        ]
+    else:
+        ordered_columns = [
+            "axis",
+            "ses",
+            "age",
+            "dvwap",
+            "n",
+            "pct_state",
+            "ev",
+            "p10",
+            "p50",
+            "p90",
+            "delta",
+            "stable_n",
+            "atr_bucket",
+        ]
+    grid_display = _format_rescue_table(
+        grid_extended.sort_values(by=["n_samples", "ev_mean"], ascending=[False, False]),
+        column_map=column_map,
+        ordered_columns=ordered_columns,
+    )
+    _emit(f"{target_state}_RESCUE_GRID_EXTENDED", grid_display, max_rows=30)
 
     candidates = grid_extended.loc[
         (grid_extended["n_samples"] >= n_min)
         & (grid_extended["delta_vs_state"].abs() <= delta_max)
-        & (grid_extended["stability_splits"] >= 2)
     ].copy()
     if not candidates.empty:
         candidates = candidates.sort_values(
@@ -528,25 +649,43 @@ def _rescue_scan_tables(
         )
     else:
         logger.info("rescue_scan target=%s no candidates meet filters", target_state)
-    _emit(f"{target_state}_TOP_CANDIDATES", candidates, max_rows=top_k)
+    candidates_display = _format_rescue_table(
+        candidates,
+        column_map=column_map,
+        ordered_columns=ordered_columns,
+    )
+    _emit(f"{target_state}_TOP_CANDIDATES", candidates_display, max_rows=top_k)
 
     if not grid_extended.empty:
         decision_df = grid_extended.copy()
         def _decision(row: pd.Series) -> str:
-            if row["n_samples"] < n_min:
-                return "ruido confirmado"
-            if row["stability_splits"] >= 2 and abs(row["delta_vs_state"]) <= delta_max:
-                return "candidato futuro"
-            return "no rescatable"
-        decision_df["conclusion"] = decision_df.apply(_decision, axis=1)
+            if row["n_samples"] >= n_min and row["ev_mean"] > 0 and row["p10"] > 0 and abs(row["delta_vs_state"]) <= delta_max:
+                return "KEEP"
+            if row["n_samples"] >= n_min and (row["ev_mean"] > 0 or row["p10"] > 0):
+                return "REVIEW"
+            return "REJECT"
+        decision_df["decision"] = decision_df.apply(_decision, axis=1)
+        decision_df = decision_df.loc[
+            (decision_df["n_samples"] >= n_min)
+            & (decision_df["delta_vs_state"].abs() <= delta_max)
+        ]
         decision_df = decision_df.sort_values(by=["n_samples", "pct_state"], ascending=[False, False])
     else:
         decision_df = pd.DataFrame(
-            {"conclusion": ["no data"]},
+            {"decision": ["no data"]},
         )
-    _emit(f"{target_state}_DECISION_TABLE", decision_df, max_rows=top_k)
+    decision_display = _format_rescue_table(
+        decision_df,
+        column_map=column_map,
+        ordered_columns=[*ordered_columns, "decision"],
+    )
+    _emit(f"{target_state}_DECISION_TABLE", decision_display, max_rows=top_k)
 
-    group_cols = [col for col in ["session_bucket", "state_age_bin", "dist_vwap_atr_bin"] if col in state_df.columns]
+    group_cols = [
+        col
+        for col in ["session_bucket", "state_age_bucket", "dist_vwap_atr_bucket"]
+        if col in state_df.columns
+    ]
     conf_col = next((col for col in confidence_cols if col in state_df.columns), None)
     if conf_col is None:
         logger.info("rescue_scan target=%s skipped confidence summary (missing)", target_state)
@@ -1202,6 +1341,33 @@ def main() -> None:
     _emit_table("EV_HVC (state, allow)", ev_hvc_grouped)
 
     if args.diagnose_rescue_scans:
+        diagnostic_cfg = _load_diagnostic_table_config(args.symbol, logger)
+        diagnostic_bins = diagnostic_cfg.get("bins", {})
+        if diagnostic_bins is None or not isinstance(diagnostic_bins, dict):
+            diagnostic_bins = {}
+        rescue_top_k = int(diagnostic_cfg.get("top_k", args.rescue_top_k))
+        rescue_n_min = int(diagnostic_cfg.get("n_min", args.rescue_n_min))
+        rescue_delta_max = float(diagnostic_cfg.get("delta_max", args.rescue_delta_max))
+        age_bins, age_labels = _coerce_bins(
+            diagnostic_bins.get("state_age"),
+            (-float("inf"), 2, 5, 10, float("inf")),
+            ("0-2", "3-5", "6-10", "11+"),
+        )
+        dist_bins, dist_labels = _coerce_bins(
+            diagnostic_bins.get("dist_vwap_atr"),
+            (-float("inf"), 0.5, 1.0, 2.0, float("inf")),
+            ("<=0.5", "0.5-1", "1-2", ">2"),
+        )
+        breakmag_bins, breakmag_labels = _coerce_bins(
+            diagnostic_bins.get("breakmag"),
+            (-float("inf"), 0.5, 1.0, 1.5, 2.5, float("inf")),
+            ("<=0.5", "0.5-1", "1-1.5", "1.5-2.5", ">2.5"),
+        )
+        reentry_bins, reentry_labels = _coerce_bins(
+            diagnostic_bins.get("reentry"),
+            (-float("inf"), 0.5, 1.5, 2.5, 4.5, float("inf")),
+            ("0", "1", "2", "3-4", "5+"),
+        )
         df_outputs = outputs.copy()
         df_outputs["state"] = outputs["state_hat"].map(
             lambda v: StateLabels(v).name if not pd.isna(v) else "NA"
@@ -1221,9 +1387,17 @@ def main() -> None:
             df_outputs,
             target_state="BALANCE",
             quality_col="quality_label",
-            top_k=args.rescue_top_k,
-            n_min=args.rescue_n_min,
-            delta_max=args.rescue_delta_max,
+            top_k=rescue_top_k,
+            n_min=rescue_n_min,
+            delta_max=rescue_delta_max,
+            age_bins=age_bins,
+            age_labels=age_labels,
+            dist_bins=dist_bins,
+            dist_labels=dist_labels,
+            break_mag_bins=breakmag_bins,
+            break_mag_labels=breakmag_labels,
+            reentry_bins=reentry_bins,
+            reentry_labels=reentry_labels,
             logger=logger,
             console=console if use_rich else None,
             table_class=table_class if use_rich else None,
@@ -1232,9 +1406,17 @@ def main() -> None:
             df_outputs,
             target_state="TRANSITION",
             quality_col="quality_label",
-            top_k=args.rescue_top_k,
-            n_min=args.rescue_n_min,
-            delta_max=args.rescue_delta_max,
+            top_k=rescue_top_k,
+            n_min=rescue_n_min,
+            delta_max=rescue_delta_max,
+            age_bins=age_bins,
+            age_labels=age_labels,
+            dist_bins=dist_bins,
+            dist_labels=dist_labels,
+            break_mag_bins=breakmag_bins,
+            break_mag_labels=breakmag_labels,
+            reentry_bins=reentry_bins,
+            reentry_labels=reentry_labels,
             logger=logger,
             console=console if use_rich else None,
             table_class=table_class if use_rich else None,
