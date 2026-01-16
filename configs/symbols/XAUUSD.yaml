@@ -76,3 +76,13 @@ event_scorer:
         min_temporal_dispersion: 0.3
         max_score_tail_slope: 2.5
         min_calib_samples: 80
+
+allow_context_filters:
+  ALLOW_transition_failure:
+    enabled: true
+    require_all: true
+    sessions_in: ["LONDON", "NY"]
+    state_age_max: 5
+    dist_vwap_atr_max: 1.5
+    breakmag_min: 0.25
+    reentry_min: 1.0
