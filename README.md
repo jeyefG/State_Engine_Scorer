@@ -126,3 +126,21 @@ Last bar rules fired: ['ALLOW_balance_fade']
 Model saved: models/xauusd_state_engine.pkl
 Report saved: reports/xauusd_state_engine.json
 ```
+
+## Diagnóstico RESCATE (antes vs después)
+
+Antes (columnas truncadas y buckets con NaN):
+
+```
+BALANCE_RESCUE_GRID_EXTENDED
+ax…  st…  di…    n  pct_state      ev     p10     p50     p90    delta  st…
+...  NY   NaN  118     12.34  0.00012  -0.0003  0.0001  0.0005  0.00002  1
+```
+
+Después (columnas cortas, buckets sin NaN):
+
+```
+BALANCE_RESCUE_GRID_EXTENDED
+axis    ses   age   dvwap        n  pct_state        ev       p10       p50       p90     delta  stable_n atr_bucket
+ses,age NY    0-2   <=0.5      118   12.340000  0.000120 -0.000300  0.000100  0.000500  0.000020         2       1-1.25
+```
