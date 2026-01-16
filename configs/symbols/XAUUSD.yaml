@@ -1,4 +1,3 @@
-symbol: "XAUUSD.mg"
 event_scorer:
   score_tf: "M5"
   allow_tf: "H1"
