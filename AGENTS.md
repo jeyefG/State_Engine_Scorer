@@ -142,6 +142,10 @@ Un ALLOW **no responde a la pregunta**:
 Sino a:  
 > “¿Se cumple esta configuración contextual específica?”
 
+El término histórico ALLOW_* puede leerse semánticamente como LOOK_FOR_*:
+indica un contexto donde tiene sentido observar activamente cierta configuración,
+sin implicar decisión ni operabilidad.
+
 ### Especialización por símbolo
 
 En Fase D, los ALLOWs:
