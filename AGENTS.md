@@ -1,62 +1,304 @@
-# AGENTS.md — State Engine + Quality Layer (descriptivo-first)
-
-## Propósito (actualizado – Fase C)
-
-Este repositorio implementa un **State Engine** cuyo rol es
-**clasificar el estado estructural del mercado** de forma robusta, causal y generalizable.
-
-El sistema se organiza en **capas conceptualmente separadas**:
-
-### 1. State Layer (existente, estable)
-- Clasifica el mercado en:
-  - `BALANCE`
-  - `TRANSITION`
-  - `TREND`
-- No predice dirección, retorno ni timing.
-- No se redefine ni se optimiza en Fase C.
-
-### 2. Quality Layer (nueva – Fase C)
-- Capa **estrictamente descriptiva**, condicionada al estado base.
-- Caracteriza la **calidad interna del régimen**:
-  - estabilidad
-  - coherencia
-  - fricción
-  - degradación
-- **NO genera señales**
-- **NO habilita ni prohíbe trades**
-- **NO se valida con métricas económicas**
-- Su objetivo es **reducir incertidumbre contextual**, no crear edge.
-
-### 3. Capas operativas (fuera de scope de Fase C)
-- Gating (`ALLOW_*`)
-- Event Scorer (M5)
-- Ejecución, SL/TP, backtesting, performance
-
-**Fase C se enfoca exclusivamente en la Quality Layer.**
+# AGENTS.md — State Engine / Quality / Contextual Layers  
+Arquitectura por fases (descriptivo → contextual → exploratorio)
 
 ---
 
-## Principios epistemológicos — Fase C (NO negociables)
+## Propósito general del repositorio
 
-- Las Quality Labels son:
-  - descriptivas, no predictivas
-  - humanas y visualizables
-  - condicionadas al estado base
-- Ninguna Quality Label se valida usando:
-  - EV
-  - PnL
-  - winrate
-  - payoff
-  - drawdown
-- Se prefiere:
-  - falsos negativos > falsos positivos
-  - no clasificar > clasificar mal
-- “No clasificado” es un output válido.
-- Si no hay evidencia estructural clara, se declara explícitamente.
-- La estabilidad temporal y la coherencia lógica
-  son más importantes que la cobertura.
-- La Quality Layer **no rescata estados malos**
-  ni fuerza interpretaciones.
+Este repositorio implementa un **State Engine** cuyo rol es describir la **estructura del mercado** de forma:
+
+- robusta  
+- causal (≤ t)  
+- generalizable  
+- independiente de resultado económico  
+
+El sistema se organiza explícitamente en **fases conceptuales**, donde cada etapa tiene:
+- un objetivo propio,
+- un tipo de validación permitido,
+- y límites epistemológicos claros.
+
+El propósito del proyecto es **contextualizar decisiones de trading**, no generarlas prematuramente.
+
+---
+
+## Objetivo operativo del sistema (visión práctica)
+
+El objetivo del sistema es **reducir y concentrar el espacio de interpretación del mercado en tiempo real**, acercándolo a un conjunto pequeño, explícito y auditable de **narrativas estructurales plausibles**, sin inferir outcome ni forzar decisiones.
+
+El sistema no decide qué hacer.  
+Decide **cómo entender dónde se está parado**.
+
+---
+
+## Visión general por fases
+
+| Fase | Rol | Naturaleza |
+|----|----|----|
+| **A** | Representación temporal | descriptiva |
+| **B** | Validación estructural | descriptiva |
+| **C** | Calidad del contexto | descriptiva |
+| **D** | Contextualización estructural avanzada | descriptiva-contextual |
+| **E** | Scoring intradía condicionado | exploratoria |
+
+> Las fases **no son intercambiables**.  
+> Las métricas económicas **no son válidas** antes de Fase D,  
+> y **no son requeridas ni centrales** en Fase D.
+
+---
+
+## Fase A — Representación temporal
+
+**Objetivo**  
+Encontrar, por símbolo, una **representación temporal razonable** del mercado.
+
+**Qué se define**
+- Timeframe base del State Engine (H1, H2, etc.)
+- Tamaño de ventana (`window_hours`, `k_bars`)
+
+**Criterios**
+- coherencia estructural
+- estabilidad temporal
+- interpretabilidad humana
+
+**Explícitamente fuera de scope**
+- edge
+- EV
+- PnL
+- decisiones de trading
+
+---
+
+## Fase B — Validación estructural
+
+**Objetivo**  
+Validar que el State Engine **clasifica estados de forma estable y no degenerada**.
+
+**Qué se valida**
+- distribución de estados
+- persistencia temporal
+- coherencia lógica
+- estabilidad por splits temporales
+
+**Resultado A+B**
+> Cada símbolo queda asociado a un **TF + window_hours** razonable para describir su estructura,  
+> sin exigir valor predictivo.
+
+---
+
+## Fase C — Quality Layer (calidad del contexto)
+
+**Objetivo**  
+Describir la **calidad interna** de un estado ya clasificado.
+
+La Fase C **no busca edge**.  
+Busca **reducir incertidumbre contextual**.
+
+### Rol de la Quality Layer
+- caracterizar estabilidad, coherencia, fricción, degradación
+- siempre condicionada al estado base
+- sin inferir dirección, timing ni outcome
+
+### Principios no negociables
+Las Quality Labels son:
+- descriptivas, no predictivas  
+- humanas y visualizables  
+- independientes de métricas económicas  
+
+**Preferencias explícitas**
+- falsos negativos > falsos positivos  
+- no clasificar > clasificar mal  
+- “no clasificado” es un output válido  
+
+---
+
+## Fase D — ALLOWs  
+**Contextualización estructural avanzada**
+
+### Rol real de un ALLOW
+
+Un **ALLOW** es una **etiqueta de contexto adicional**, definida sobre el output conjunto de:
+
+- State Layer  
+- Quality Layer  
+
+Su función es **describir una sub-configuración estructural específica**,  
+no evaluar su conveniencia económica.
+
+### Qué es un ALLOW
+- una **descripción contextual más granular**
+- una **condición estructural explícita**
+- una **etiqueta interpretable**
+
+### Qué NO es un ALLOW
+- NO es una señal
+- NO es una decisión
+- NO implica operabilidad
+- NO habilita ni bloquea trades
+- NO asume edge
+
+Un ALLOW **no responde a la pregunta**:  
+> “¿Conviene tradear este contexto?”
+
+Sino a:  
+> “¿Se cumple esta configuración contextual específica?”
+
+### Especialización por símbolo
+
+En Fase D, los ALLOWs:
+- **sí pueden especializarse por símbolo**
+- siguen siendo descriptivos
+- no reentrenan modelos
+- no optimizan performance
+
+Cualquier uso posterior de ALLOWs como filtros operativos o gates económicos:
+- es **una decisión de diseño futura**
+- no está asumida
+- no es parte de esta fase
+
+---
+
+## Fase E — Exploración de edge condicionado (Event Scorer)  
+**Estado actual: exploratorio**
+
+### Contexto histórico
+
+El Event Scorer (M5) existe en el repositorio como resultado de exploraciones previas.
+
+Sin embargo:
+- fue implementado **antes** de una definición clara de las fases A–D
+- su rol epistemológico no estaba correctamente delimitado
+- su validez como “mejor enfoque” **no está demostrada**
+
+> La Fase E **solo tiene sentido** si las Fases A–D están sólidas y bien definidas.
+
+---
+
+### Rol de la Fase E
+
+La Fase E tiene como objetivo **explorar la existencia de edge estadístico relativo**,  
+**condicionado estrictamente** a contextos estructurales ya definidos por las Fases A–D.
+
+Esta fase **no crea contexto**.  
+Solo interroga contextos **ya bien especificados**.
+
+---
+
+### Qué significa “edge” en Fase E
+
+En esta fase, “edge” se entiende como:
+
+- un **sesgo estadístico no trivial**
+- observado **solo bajo ciertos contextos explícitos**
+- estable a través del tiempo
+- superior a un baseline comparable
+- **sin asumir convertibilidad directa a señal operativa**
+
+No se busca:
+- maximizar PnL
+- construir setups
+- optimizar reglas de entrada/salida
+
+---
+
+### Qué hace la Fase E (permitido)
+
+La Fase E **sí puede**:
+
+- operar en temporalidad intradía (ej. M5)
+- medir distribuciones condicionadas por:
+  - State  
+  - Quality  
+  - ALLOW (como contexto)
+- producir métricas de **edge relativo** (ej. `edge_score`)
+- comparar contra:
+  - contexto más amplio  
+  - baseline incondicional  
+- aceptar resultados nulos como outcome válido
+- descartar hipótesis sin forzar conclusiones
+
+El output de la Fase E es **telemetría**, no decisión.
+
+---
+
+### Qué NO hace la Fase E (límites duros)
+
+La Fase E **NO debe**:
+
+- generar BUY / SELL
+- decidir timing
+- definir SL / TP
+- optimizar thresholds para performance
+- reetiquetar o redefinir contexto
+- justificar retroactivamente Fases A–D
+- asumir que edge observado implica explotabilidad
+
+Si alguna de estas condiciones se viola,  
+la implementación **deja de ser Fase E** y debe reclasificarse.
+
+---
+
+### Criterios de validez de Fase E
+
+Una implementación de Fase E se considera **válida** solo si cumple:
+
+- **Condicionalidad estricta**  
+  El edge se mide *solo* dentro de contextos definidos por A–D.
+
+- **Separación semántica**  
+  El scorer no introduce nuevas narrativas ni redefine estados.
+
+- **Estabilidad temporal**  
+  El edge observado persiste en splits temporales razonables.
+
+- **Comparabilidad**  
+  Existe un baseline claro contra el cual se mide el sesgo.
+
+- **Tolerancia al resultado nulo**  
+  “No hay edge aquí” es un outcome aceptado y explícito.
+
+---
+
+### Criterios de invalidez (red flags)
+
+La Fase E se considera **epistemológicamente inválida** si:
+
+- el edge solo existe globalmente, pero no condicionado
+- el resultado depende críticamente de tuning fino
+- pequeñas variaciones de parámetros destruyen el efecto
+- el contexto se redefine para “rescatar” performance
+- el scorer empieza a comportarse como señal encubierta
+
+---
+
+### Relación con fases posteriores
+
+La Fase E **no habilita ejecución**.
+
+Cualquier decisión de:
+- convertir edge en señal
+- definir reglas de entrada/salida
+- automatizar decisiones
+
+corresponde a **una fase posterior**, explícitamente distinta  
+(y no asumida en este repositorio).
+
+---
+
+### Resultado esperado de la Fase E
+
+Al completar la Fase E, el sistema puede:
+
+- confirmar que ciertos contextos **no presentan edge**
+- identificar contextos con **sesgo estadístico estable**
+- descartar mecanismos intradía espurios
+- informar decisiones futuras sin forzarlas
+
+La Fase E **puede fallar**, y ese fallo es informativo.
+
+---
+
+> Si la Fase E necesita edge para justificar el contexto,  
+> el problema está en las Fases A–D, no en el scorer.
 
 ---
 
@@ -72,7 +314,6 @@ train_state_engine.py
 train_event_scorer.py
 run_pipeline_backtest.py
 watchdog_state_engine.py
-...
 
 state_engine/
 pipeline.py
@@ -83,146 +324,33 @@ gating.py
 scoring.py
 session.py
 mt5_connector.py
-...
 
 tests/
 test_features.py
 test_events.py
 test_config_loader.py
-...
 
-**Nota**  
-La infraestructura se reutiliza.  
-La lógica conceptual previa no se asume válida para Fase C.
+La infraestructura se reutiliza entre fases.  
+La **validez conceptual no se hereda automáticamente**.
 
 ---
 
-## State Engine (State Layer)
+## Fuera de scope (Fases A–C)
 
-### Definición general
-- **Timeframe:** H1 (o H2 según símbolo, ya validado en Fases A/B)
-- **Ventanas fijas (ejemplo):**
-  - `W`: contexto
-  - `N`: reciente
-- El estado se define por **comportamiento agregado**, no por patrones aislados.
-
-### Estados
-- `BALANCE`: rotación y aceptación bilateral.
-- `TRANSITION`: intento de cambio con aceptación incompleta o fallo.
-- `TREND`: migración sostenida con aceptación.
-
-### Variables PA-first (≤ t)
-- NetMove (diagnóstico)
-- Path
-- Efficiency Ratio (ER)
-- Range
-- Close Location
-- Break Magnitude
-- Reentry Count
-- Inside Bars Ratio
-- Swing Count
-
-**Importante**
-- El State Engine NO se especializa por símbolo en Fase C.
-- Su semántica se mantiene universal.
+- optimización por performance  
+- nuevos ALLOWs  
+- reglas de entrada / salida  
+- ejecución, SL/TP  
+- automatización de decisiones  
 
 ---
 
-## Quality Layer (Fase C)
+## Objetivo acumulado del sistema
 
-### Rol
-Describir la **calidad interna del estado**, sin inferir outcome.
+Consideradas en conjunto, las fases A–E buscan construir un sistema que:
 
-Ejemplos de intención (no exhaustivos):
-- Fortaleza vs debilidad
-- Expansión vs compresión
-- Continuidad vs fricción
-- Aceptación vs rechazo
-
-### Propiedades requeridas de una Quality Label
-Una Quality Label es válida solo si cumple:
-- coherencia lógica con el estado base
-- distribución no degenerada
-- persistencia temporal razonable
-- estabilidad por splits temporales
-- independencia total del resultado económico
-
-Si una label es “bonita” pero inestable → se descarta.  
-Si es rara pero clara → se conserva.
-
----
-
-## Configuración por símbolo — alcance real
-
-La configuración por símbolo en Fase C existe para:
-- ajustar parámetros descriptivos
-- definir umbrales estructurales
-- adaptar normalizaciones o escalas
-
-La configuración por símbolo **NO existe** para:
-- optimizar performance
-- redefinir estados
-- forzar cobertura de labels
-- introducir lógica operativa
-
-La especialización por símbolo:
-- es **paramétrica**
-- es **descriptiva**
-- **no reentrena** el State Engine
-
----
-
-## ALLOWs (estado actual — legado)
-
-Los `ALLOW_*` existentes pertenecen a una fase previa del proyecto.
-
-- Son reglas genéricas cross-símbolo.
-- No forman parte del foco de Fase C.
-- No deben:
-  - extenderse
-  - especializarse
-  - optimizarse
-durante esta fase.
-
-En Fase C:
-- Los ALLOWs se consideran **artefactos heredados**.
-- Pueden ser ignorados o desactivados conceptualmente.
-- Su rediseño (si ocurre) es posterior
-  a la validación completa de la Quality Layer.
-
----
-
-## Event Scorer (fuera de scope de Fase C)
-
-- Opera en M5.
-- Mide edge relativo condicionado por contexto H1.
-- Produce `edge_score` como telemetría.
-- No genera señales ni decisiones.
-
-Cualquier modificación al Event Scorer
-queda explícitamente fuera de Fase C.
-
----
-
-## Fuera de scope — Fase C
-
-- Optimización por performance.
-- Nuevos ALLOWs.
-- Reglas de entrada/salida.
-- Ajustes al Event Scorer.
-- Cambios en ejecución o SL/TP.
-- Automatización de decisiones de trading.
-
-Cualquier propuesta que cruce estos límites
-debe considerarse **inválida** en esta fase.
-
----
-
-## Resultado esperado de Fase C
-
-Un sistema que:
-- Clasifica estados de forma robusta (ya logrado).
-- Describe la **calidad** de esos estados sin sesgo económico.
-- Reduce incertidumbre contextual.
-- Tolera explícitamente el “no sé”.
-- Protege la integridad epistemológica del sistema.
+- reduce la ambigüedad interpretativa del mercado en tiempo real
+- acerca la lectura a narrativas estructurales específicas y auditables
+- separa estrictamente descripción, contexto y exploración de edge
+- evita decisiones prematuras basadas en interpretación débil
+- preserva integridad epistemológica en todo el pipeline
