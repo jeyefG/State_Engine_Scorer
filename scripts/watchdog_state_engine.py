@@ -1,4 +1,4 @@
-"""Watchdog for State Engine opportunities on new H1 bars."""
+"""Watchdog for State Engine opportunities on new context bars."""
 
 from __future__ import annotations
 
@@ -30,6 +30,29 @@ from state_engine.scoring import EventScorerBundle, FeatureBuilder
 
 
 LABEL_ORDER = [StateLabels.BALANCE, StateLabels.TRANSITION, StateLabels.TREND]
+_TIMEFRAME_FLOOR_MAP = {
+    "M1": "1min",
+    "M2": "2min",
+    "M3": "3min",
+    "M4": "4min",
+    "M5": "5min",
+    "M6": "6min",
+    "M10": "10min",
+    "M12": "12min",
+    "M15": "15min",
+    "M20": "20min",
+    "M30": "30min",
+    "H1": "1h",
+    "H2": "2h",
+    "H3": "3h",
+    "H4": "4h",
+    "H6": "6h",
+    "H8": "8h",
+    "H12": "12h",
+    "D1": "1D",
+    "W1": "1W",
+    "MN1": "MS",
+}
 
 
 def try_import_rich() -> dict[str, Any] | None:
@@ -63,13 +86,13 @@ def parse_args() -> argparse.Namespace:
         "--lookback-days",
         type=int,
         default=45,
-        help="Días de historial H1 para calcular features.",
+        help="Días de historial (context TF) para calcular features.",
     )
     parser.add_argument(
         "--poll-seconds",
         type=int,
         default=60,
-        help="Intervalo de polling en segundos para nuevas velas H1.",
+        help="Intervalo de polling en segundos para nuevas velas del contexto.",
     )
     parser.add_argument(
         "--once",
@@ -151,13 +174,20 @@ def load_model(symbol: str, model_dir: Path, template: str) -> tuple[StateEngine
     return model, path
 
 
-def resolve_context_tf(requested: str | None, model: StateEngineModel) -> str:
+def resolve_context_tf(requested: str | None, model: StateEngineModel) -> tuple[str, str]:
     meta_tf = model.metadata.get("timeframe") if isinstance(model.metadata, dict) else None
     if requested:
-        return str(requested).upper()
+        return str(requested).upper(), "override(--context-tf)"
     if meta_tf:
-        return str(meta_tf).upper()
-    return "H1"
+        return str(meta_tf).upper(), "metadata"
+    return "H1", "default"
+
+
+def _timeframe_floor_freq(timeframe: str) -> str:
+    tf = str(timeframe).upper()
+    if tf not in _TIMEFRAME_FLOOR_MAP:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    return _TIMEFRAME_FLOOR_MAP[tf]
 
 
 def load_event_scorer(
@@ -240,6 +270,7 @@ def render_summary(
     labels: pd.Series,
     outputs: pd.DataFrame,
     gating: pd.DataFrame,
+    context_tf: str,
     last_bar_ts: pd.Timestamp,
     server_now: pd.Timestamp,
     console: Any | None,
@@ -284,7 +315,9 @@ def render_summary(
             f"[cyan]Gating allow rate:[/cyan] {gating_allow_rate*100:.2f}% "
             f"(block {gating_block_rate*100:.2f}%)"
         )
-        console.print(f"[cyan]Last H1 bar used:[/cyan] {last_bar_ts} | age_min={bar_age_minutes:.2f}")
+        console.print(
+            f"[cyan]Last {context_tf} bar used:[/cyan] {last_bar_ts} | age_min={bar_age_minutes:.2f}"
+        )
         console.print(
             f"[cyan]Server now (tick):[/cyan] {server_now} | tick_age_min_vs_utc={tick_age_min_utc:.2f}"
         )
@@ -304,7 +337,7 @@ def render_summary(
         print(f"Samples: {n_samples} (train={n_train}, test={n_test})")
     print(f"Baseline: {baseline_label} ({baseline_pct:.2f}%)")
     print(f"Gating allow rate: {gating_allow_rate*100:.2f}% (block {gating_block_rate*100:.2f}%)")
-    print(f"Last H1 bar used: {last_bar_ts} | age_min={bar_age_minutes:.2f}")
+    print(f"Last {context_tf} bar used: {last_bar_ts} | age_min={bar_age_minutes:.2f}")
     print(f"Server now (tick): {server_now} | tick_age_min_vs_utc={tick_age_min_utc:.2f}")
     print(f"Last bar decision: ALLOW={last_allow} | state_hat={state_label} | margin={margin_value}")
     print(f"Last bar rules fired: {last_rules if last_rules else '[]'}")
@@ -343,13 +376,15 @@ def main() -> None:
             models[symbol] = model
             model_paths[symbol] = path
             feature_configs[symbol] = feature_config_from_metadata(model.metadata)
-            context_tf = resolve_context_tf(args.context_tf, model)
+            context_tf, context_source = resolve_context_tf(args.context_tf, model)
             context_tfs[symbol] = context_tf
             feature_builders[symbol] = FeatureBuilder(context_tf=context_tf)
-            print(f"[watchdog] symbol={symbol} context_tf={context_tf}")
+            print(f"[watchdog] symbol={symbol} context_tf resolved={context_tf} source={context_source}")
             scorer, scorer_path = load_event_scorer(symbol, scorer_dir, args.scorer_template)
             scorers[symbol] = scorer
             scorer_paths[symbol] = scorer_path
+            if scorer is not None:
+                feature_builders[symbol].validate_context_metadata(scorer.metadata)
 
         last_seen: dict[str, pd.Timestamp] = {}
 
@@ -358,11 +393,12 @@ def main() -> None:
                 break
             for symbol in symbols:
                 server_now = connector.server_now(symbol).tz_localize(None)
-                cutoff = server_now.floor("h")
+                context_tf = context_tfs.get(symbol, "H1")
+                cutoff = server_now.floor(_timeframe_floor_freq(context_tf))
                 start = cutoff - timedelta(days=args.lookback_days)
                 end = cutoff + timedelta(days=1)
 
-                ohlcv = connector.obtener_h1(symbol, start, end)
+                ohlcv = connector.obtener_ohlcv(symbol, context_tf, start, end)
                 ohlcv = ohlcv[ohlcv.index < cutoff]
                 if ohlcv.empty:
                     continue
@@ -396,6 +432,7 @@ def main() -> None:
                     labels=labels,
                     outputs=outputs,
                     gating=gating,
+                    context_tf=context_tf,
                     last_bar_ts=last_bar_ts,
                     server_now=server_now,
                     console=console,
@@ -424,7 +461,6 @@ def main() -> None:
                         last_seen[symbol] = last_bar_ts
                         continue
 
-                    context_tf = context_tfs.get(symbol, "H1")
                     df_m5_ctx = build_m5_context(
                         df_m5,
                         outputs,
@@ -468,13 +504,13 @@ def main() -> None:
                                 ranked["edge_score"] = edge_scores
                                 ranked = _entry_proxy(ranked, df_m5)
                                 if args.phase_e:
-                                    if args.min_edge_score is not None:
-                                        lines.append(
-                                            "phase_e=ON: min_edge_score ignored (telemetry only)."
-                                        )
+                                    lines.append(
+                                        "phase_e=ON: min_edge_score ignored (telemetry only)."
+                                    )
                                 elif args.min_edge_score is not None:
                                     ranked = ranked[ranked["edge_score"] >= args.min_edge_score]
                                 ranked = ranked.sort_values("edge_score", ascending=False)
+                                lines.append("top_events is presentation-only (no decisions).")
                                 lines.append("Top events (sorted by edge_score desc):")
                                 for idx, (ts, row) in enumerate(
                                     ranked.head(args.top_events).iterrows(), start=1

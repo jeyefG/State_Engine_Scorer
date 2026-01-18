@@ -318,18 +318,24 @@ def _attach_output_metadata(
     symbol: str,
     allow_tf: str,
     score_tf: str,
+    context_tf: str | None = None,
     config_path: Path | None,
     mode: str,
+    config_hash: str | None = None,
+    prompt_version: str | None = None,
 ) -> pd.DataFrame:
     output = df.copy()
     metadata = [
         ("run_id", run_id),
         ("symbol_effective", symbol),
         ("symbol", symbol),
+        ("context_tf", context_tf),
         ("allow_tf", allow_tf),
         ("score_tf", score_tf),
         ("mode", mode),
         ("config_path", str(config_path) if config_path is not None else None),
+        ("config_hash", config_hash),
+        ("prompt_version", prompt_version),
     ]
     for key, value in reversed(metadata):
         if key in output.columns:
@@ -887,9 +893,11 @@ def _build_research_summary_from_grid(grid_results: pd.DataFrame, *, phase_e: bo
         return {
             "qualified_variants": 0,
             "top_5_variants_by_r_mean": [],
-            "verdict": "NO LOCAL EDGE DETECTED",
+            "verdict": "TELEMETRY_ONLY" if phase_e else "NO LOCAL EDGE DETECTED",
         }
-    qualified_count = int(grid_results["qualified"].sum()) if "qualified" in grid_results.columns else 0
+    qualified_count = (
+        0 if phase_e else int(grid_results["qualified"].sum()) if "qualified" in grid_results.columns else 0
+    )
     top_rows = (
         grid_results.sort_values(["r_mean", "winrate", "n_total"], ascending=[False, False, False])
         .head(5)
@@ -910,8 +918,10 @@ def _build_research_summary_from_grid(grid_results: pd.DataFrame, *, phase_e: bo
             "p10",
         ]
     ]
-    if qualified_count > 0:
-        verdict = "LOCAL EDGE OBSERVED (TELEMETRY ONLY)" if phase_e else "LOCAL EDGE DETECTED — CANDIDATE FOR PROD SPECIALIZATION"
+    if phase_e:
+        verdict = "TELEMETRY_ONLY"
+    elif qualified_count > 0:
+        verdict = "LOCAL EDGE DETECTED — CANDIDATE FOR PROD SPECIALIZATION"
     else:
         verdict = "NO LOCAL EDGE DETECTED"
     return {
@@ -963,6 +973,7 @@ def _persist_research_outputs(
     symbol: str,
     allow_tf: str,
     score_tf: str,
+    context_tf: str,
     run_id: str,
     config_path: Path | None,
     grid_results: pd.DataFrame,
@@ -976,32 +987,47 @@ def _persist_research_outputs(
     mode_suffix: str,
     research_mode: bool,
     mode: str,
+    phase_e: bool,
 ) -> None:
     if not research_mode:
         return
     model_dir.mkdir(parents=True, exist_ok=True)
     output_prefix = _output_prefix(symbol, score_tf, run_id)
     grid_path = model_dir / f"research_grid_results_{output_prefix}{mode_suffix}.csv"
+    grid_export = grid_results
+    family_export = family_results
+    if phase_e:
+        if "qualified" in grid_export.columns:
+            grid_export = grid_export.rename(columns={"qualified": "qualified_telemetry"})
+        if family_export is not None and "qualified" in family_export.columns:
+            family_export = family_export.rename(columns={"qualified": "qualified_telemetry"})
+
     grid_output = _attach_output_metadata(
-        grid_results,
+        grid_export,
         run_id=run_id,
         symbol=symbol,
         allow_tf=allow_tf,
         score_tf=score_tf,
-        config_path=config_path,
-        mode=mode,
-    )
+        context_tf=context_tf,
+            config_path=config_path,
+            mode=mode,
+            config_hash=config_hash,
+            prompt_version=prompt_version,
+        )
     grid_output.to_csv(grid_path, index=False)
-    if family_results is not None:
+    if family_export is not None:
         families_path = model_dir / f"research_grid_families_{output_prefix}{mode_suffix}.csv"
         families_output = _attach_output_metadata(
-            family_results,
+            family_export,
             run_id=run_id,
             symbol=symbol,
             allow_tf=allow_tf,
             score_tf=score_tf,
+            context_tf=context_tf,
             config_path=config_path,
             mode=mode,
+            config_hash=config_hash,
+            prompt_version=prompt_version,
         )
         families_output.to_csv(families_path, index=False)
     summary_path = model_dir / f"research_summary_{output_prefix}{mode_suffix}.json"
@@ -1138,7 +1164,7 @@ def _print_research_summary_block(
                 w_min=min_winrate,
             )
         )
-    print("top_5_candidate_cells_by_r_mean:")
+    print("top_5_cells_by_r_mean:")
     if top_rows.empty:
         print("(no candidates)")
     else:
@@ -1588,6 +1614,56 @@ def _build_training_diagnostic_report(
     return report
 
 
+def _persist_diagnostic_tables(
+    *,
+    diagnostic_report: dict[str, pd.DataFrame],
+    supply_funnel: pd.DataFrame,
+    model_dir: Path,
+    output_prefix: str,
+    output_suffix: str,
+    mode_suffix: str,
+    run_id: str,
+    symbol: str,
+    allow_tf: str,
+    score_tf: str,
+    context_tf: str,
+    config_path: Path | None,
+    mode: str,
+    config_hash: str | None,
+    prompt_version: str | None,
+    logger: logging.Logger,
+) -> None:
+    model_dir.mkdir(parents=True, exist_ok=True)
+    tables = {
+        "coverage_global": diagnostic_report.get("coverage_global", pd.DataFrame()),
+        "coverage_by_state_margin": diagnostic_report.get("coverage_by_state_margin", pd.DataFrame()),
+        "regime_edge_full": diagnostic_report.get("regime_edge_full", pd.DataFrame()),
+        "regime_edge_ranked": diagnostic_report.get("regime_edge_ranked", pd.DataFrame()),
+        "stability": diagnostic_report.get("stability", pd.DataFrame()),
+        "session_conditional_edge": diagnostic_report.get("session_conditional_edge", pd.DataFrame()),
+        "supply_funnel": supply_funnel,
+    }
+    for name, frame in tables.items():
+        output_path = _with_suffix(
+            model_dir / f"{name}_{output_prefix}_event_scorer{mode_suffix}.csv",
+            output_suffix,
+        )
+        output = _attach_output_metadata(
+            frame,
+            run_id=run_id,
+            symbol=symbol,
+            allow_tf=allow_tf,
+            score_tf=score_tf,
+            context_tf=context_tf,
+            config_path=config_path,
+            mode=mode,
+            config_hash=config_hash,
+            prompt_version=prompt_version,
+        )
+        output.to_csv(output_path, index=False)
+        logger.info("%s_out=%s", name, output_path)
+
+
 def _run_training_for_k(
     args: argparse.Namespace,
     k_bars: int,
@@ -1617,6 +1693,12 @@ def _run_training_for_k(
     research_variants: list,
     baseline_thresholds: dict[str, float | int | None],
     baseline_thresholds_source: str,
+    config_hash: str | None,
+    prompt_version: str | None,
+    state_model_path: Path,
+    state_model_metadata: dict[str, object],
+    context_nan_pct: dict[str, float],
+    event_counts: dict[str, dict[str, int]],
 ) -> tuple[pd.DataFrame, pd.DataFrame | None] | None:
     logger = logging.getLogger("event_scorer")
     research_enabled = research_mode and bool(research_cfg.get("enabled", False))
@@ -1634,6 +1716,46 @@ def _run_training_for_k(
             include_transition=args.include_transition,
         )
     )
+
+    def _base_summary_payload(verdict: str) -> dict[str, object]:
+        return {
+            "run_id": run_id,
+            "symbol": args.symbol,
+            "start": args.start,
+            "end": args.end,
+            "score_tf": args.score_tf,
+            "allow_tf": args.allow_tf,
+            "context_tf": args.context_tf,
+            "state_model_path": str(state_model_path),
+            "state_model_metadata_timeframe": (
+                state_model_metadata.get("timeframe") if isinstance(state_model_metadata, dict) else None
+            ),
+            "config_path": str(config_path) if config_path is not None else None,
+            "config_hash": config_hash,
+            "prompt_version": prompt_version,
+            "allow_cutoff": h1_cutoff,
+            "h1_cutoff": h1_cutoff,
+            "m5_cutoff": score_cutoff,
+            "score_cutoff": score_cutoff,
+            "k_bars": k_bars,
+            "reward_r": args.reward_r,
+            "sl_mult": args.sl_mult,
+            "r_thr": args.r_thr,
+            "tie_break": args.tie_break,
+            "meta_policy": {
+                "enabled": args.meta_policy == "on",
+                "meta_margin_min": args.meta_margin_min,
+                "meta_margin_max": args.meta_margin_max,
+            },
+            "phase_e": args.phase_e,
+            "verdict": verdict,
+            "event_counts": event_counts,
+            "context_columns": {
+                "state_col": args.context_state_col,
+                "margin_col": args.context_margin_col,
+            },
+            "context_nan_pct": context_nan_pct,
+        }
 
     events = label_events(
         detected_events.copy(),
@@ -1670,6 +1792,47 @@ def _run_training_for_k(
             state_col=args.context_state_col,
             phase_e=args.phase_e,
         )
+        supply_funnel = pd.DataFrame(
+            [
+                {
+                    "score_total": score_total,
+                    "after_merge": score_ctx_merged,
+                    "after_dropna_ctx": score_ctx_dropna,
+                    "events_detected": len(detected_events),
+                    "events_labeled": labeled_total,
+                    "events_post_state_filter": 0,
+                    "events_post_meta": 0,
+                }
+            ]
+        )
+        _persist_diagnostic_tables(
+            diagnostic_report=diagnostic_report,
+            supply_funnel=supply_funnel,
+            model_dir=args.model_dir,
+            output_prefix=output_prefix,
+            output_suffix=output_suffix,
+            mode_suffix=mode_suffix,
+            run_id=run_id,
+            symbol=args.symbol,
+            allow_tf=args.allow_tf,
+            score_tf=args.score_tf,
+            context_tf=args.context_tf,
+            config_path=config_path,
+            mode=mode_effective,
+            config_hash=config_hash,
+            prompt_version=prompt_version,
+            logger=logger,
+        )
+        summary_payload = _base_summary_payload(
+            "TELEMETRY_ONLY" if args.phase_e else "NO_LABELED_EVENTS"
+        )
+        summary_path = _with_suffix(
+            args.model_dir / f"summary_{output_prefix}_event_scorer.json",
+            output_suffix,
+        )
+        with summary_path.open("w", encoding="utf-8") as handle:
+            json.dump(summary_payload, handle, indent=2, default=str)
+        logger.info("summary_out=%s", summary_path)
         if research_mode:
             _print_research_summary_block(
                 diagnostic_report.get("session_conditional_edge", pd.DataFrame()),
@@ -1888,6 +2051,37 @@ def _run_training_for_k(
         state_col=args.context_state_col,
         phase_e=args.phase_e,
     )
+    supply_funnel = pd.DataFrame(
+        [
+            {
+                "score_total": score_total,
+                "after_merge": score_ctx_merged,
+                "after_dropna_ctx": score_ctx_dropna,
+                "events_detected": len(detected_events),
+                "events_labeled": labeled_total,
+                "events_post_state_filter": len(events_state_filtered),
+                "events_post_meta": len(events_for_training),
+            }
+        ]
+    )
+    _persist_diagnostic_tables(
+        diagnostic_report=diagnostic_report,
+        supply_funnel=supply_funnel,
+        model_dir=args.model_dir,
+        output_prefix=output_prefix,
+        output_suffix=output_suffix,
+        mode_suffix=mode_suffix,
+        run_id=run_id,
+        symbol=args.symbol,
+        allow_tf=args.allow_tf,
+        score_tf=args.score_tf,
+        context_tf=args.context_tf,
+        config_path=config_path,
+        mode=mode_effective,
+        config_hash=config_hash,
+        prompt_version=prompt_version,
+        logger=logger,
+    )
 
     if is_fallback:
         args.model_dir.mkdir(parents=True, exist_ok=True)
@@ -1905,8 +2099,11 @@ def _run_training_for_k(
             symbol=args.symbol,
             allow_tf=args.allow_tf,
             score_tf=args.score_tf,
+            context_tf=args.context_tf,
             config_path=config_path,
             mode=mode_effective,
+            config_hash=config_hash,
+            prompt_version=prompt_version,
         )
         labeled_output = _attach_output_metadata(
             _reset_index_for_export(labeled_events),
@@ -1914,8 +2111,11 @@ def _run_training_for_k(
             symbol=args.symbol,
             allow_tf=args.allow_tf,
             score_tf=args.score_tf,
+            context_tf=args.context_tf,
             config_path=config_path,
             mode=mode_effective,
+            config_hash=config_hash,
+            prompt_version=prompt_version,
         )
         detected_output.to_csv(detected_path, index=False)
         labeled_output.to_csv(labeled_path, index=False)
@@ -1932,6 +2132,16 @@ def _run_training_for_k(
             }
             print("\n[FALLBACK METRICS]")
             print(pd.DataFrame([summary]).to_string(index=False))
+        summary_payload = _base_summary_payload(
+            "TELEMETRY_ONLY" if args.phase_e else "FALLBACK_DIAGNOSTIC"
+        )
+        summary_path = _with_suffix(
+            args.model_dir / f"summary_{output_prefix}_event_scorer.json",
+            output_suffix,
+        )
+        with summary_path.open("w", encoding="utf-8") as handle:
+            json.dump(summary_payload, handle, indent=2, default=str)
+        logger.info("summary_out=%s", summary_path)
         if research_mode and research_variants:
             diagnostics_cfg = research_cfg.get("diagnostics", {}) if isinstance(research_cfg.get("diagnostics"), dict) else {}
             report = evaluate_research_variants(
@@ -2028,8 +2238,11 @@ def _run_training_for_k(
             symbol=args.symbol,
             allow_tf=args.allow_tf,
             score_tf=args.score_tf,
+            context_tf=args.context_tf,
             config_path=config_path,
             mode=mode_effective,
+            config_hash=config_hash,
+            prompt_version=prompt_version,
         )
         labeled_output = _attach_output_metadata(
             _reset_index_for_export(labeled_events),
@@ -2037,8 +2250,11 @@ def _run_training_for_k(
             symbol=args.symbol,
             allow_tf=args.allow_tf,
             score_tf=args.score_tf,
+            context_tf=args.context_tf,
             config_path=config_path,
             mode=mode_effective,
+            config_hash=config_hash,
+            prompt_version=prompt_version,
         )
         detected_output.to_csv(detected_path, index=False)
         labeled_output.to_csv(labeled_path, index=False)
@@ -2055,6 +2271,16 @@ def _run_training_for_k(
             }
             print("\n[FALLBACK METRICS]")
             print(pd.DataFrame([summary]).to_string(index=False))
+        summary_payload = _base_summary_payload(
+            "TELEMETRY_ONLY" if args.phase_e else "SINGLE_CLASS_FALLBACK"
+        )
+        summary_path = _with_suffix(
+            args.model_dir / f"summary_{output_prefix}_event_scorer.json",
+            output_suffix,
+        )
+        with summary_path.open("w", encoding="utf-8") as handle:
+            json.dump(summary_payload, handle, indent=2, default=str)
+        logger.info("summary_out=%s", summary_path)
         return
 
     warning_summary_rows: list[dict[str, int | str | float]] = []
@@ -2511,6 +2737,8 @@ def _run_training_for_k(
         "meta_policy": args.meta_policy,
         "meta_margin_min": args.meta_margin_min,
         "meta_margin_max": args.meta_margin_max,
+        "config_hash": config_hash,
+        "prompt_version": prompt_version,
         "decision_thresholds": {
             "n_min": args.decision_n_min,
             "winrate_min": args.decision_winrate_min,
@@ -2523,6 +2751,7 @@ def _run_training_for_k(
         "train_date": datetime.now(timezone.utc).isoformat(),
         "metrics_summary": metrics_summary,
         "research_enabled": research_enabled,
+        "phase_e": args.phase_e,
     }
     if research_enabled:
         metadata["research_features"] = research_cfg.get("features", {})
@@ -2556,8 +2785,11 @@ def _run_training_for_k(
             symbol=args.symbol,
             allow_tf=args.allow_tf,
             score_tf=args.score_tf,
+            context_tf=args.context_tf,
             config_path=config_path,
             mode=mode_effective,
+            config_hash=config_hash,
+            prompt_version=prompt_version,
         )
         metrics_output.to_csv(metrics_path, index=False)
         logger.info("metrics_out=%s", metrics_path)
@@ -2572,8 +2804,11 @@ def _run_training_for_k(
         symbol=args.symbol,
         allow_tf=args.allow_tf,
         score_tf=args.score_tf,
+        context_tf=args.context_tf,
         config_path=config_path,
         mode=mode_effective,
+        config_hash=config_hash,
+        prompt_version=prompt_version,
     )
     family_output.to_csv(family_path, index=False)
     logger.info("family_summary_out=%s", family_path)
@@ -2596,8 +2831,11 @@ def _run_training_for_k(
             symbol=args.symbol,
             allow_tf=args.allow_tf,
             score_tf=args.score_tf,
+            context_tf=args.context_tf,
             config_path=config_path,
             mode=mode_effective,
+            config_hash=config_hash,
+            prompt_version=prompt_version,
         )
         sample_output.to_csv(sample_path, index=False)
         logger.info("calib_top_scored_out=%s", sample_path)
@@ -2646,7 +2884,14 @@ def _run_training_for_k(
         "end": args.end,
         "score_tf": args.score_tf,
         "allow_tf": args.allow_tf,
+        "context_tf": args.context_tf,
+        "state_model_path": str(state_model_path),
+        "state_model_metadata_timeframe": (
+            state_model_metadata.get("timeframe") if isinstance(state_model_metadata, dict) else None
+        ),
         "config_path": str(config_path) if config_path is not None else None,
+        "config_hash": config_hash,
+        "prompt_version": prompt_version,
         "allow_cutoff": h1_cutoff,
         "h1_cutoff": h1_cutoff,
         "m5_cutoff": score_cutoff,
@@ -2670,6 +2915,23 @@ def _run_training_for_k(
         "feature_count": event_features_all.shape[1],
         "min_samples_train": min_samples_train,
         "k_bars": k_bars,
+        "reward_r": args.reward_r,
+        "sl_mult": args.sl_mult,
+        "r_thr": args.r_thr,
+        "tie_break": args.tie_break,
+        "meta_policy": {
+            "enabled": args.meta_policy == "on",
+            "meta_margin_min": args.meta_margin_min,
+            "meta_margin_max": args.meta_margin_max,
+        },
+        "phase_e": args.phase_e,
+        "verdict": "TELEMETRY_ONLY" if args.phase_e else "SCORER_READY",
+        "event_counts": event_counts,
+        "context_columns": {
+            "state_col": args.context_state_col,
+            "margin_col": args.context_margin_col,
+        },
+        "context_nan_pct": context_nan_pct,
     }
 
     research_summary_payload = None
@@ -2974,6 +3236,7 @@ def main() -> None:
         }
     )
     logger.info("Context NaN rates:\n%s", ctx_nan_table.to_string(index=False))
+    context_nan_pct = dict(zip(ctx_nan_table["column"], ctx_nan_table["nan_pct"]))
     df_score_ctx = df_score_ctx.dropna(subset=[state_col, margin_col])
     logger.info("Rows after dropna ctx: %s_ctx=%s", args.score_tf, len(df_score_ctx))
     score_ctx_dropna = len(df_score_ctx)
@@ -3009,6 +3272,10 @@ def main() -> None:
 
     event_config = EventDetectionConfig().for_timeframe(args.score_tf)
     detected_events = detect_events(df_score_ctx, config=event_config)
+    event_counts = {
+        "by_family": detected_events["family_id"].value_counts().to_dict() if not detected_events.empty else {},
+        "by_type": detected_events["event_type"].value_counts().to_dict() if not detected_events.empty else {},
+    }
     if detected_events.empty:
         logger.warning("No events detected; exiting.")
         events_diag = pd.DataFrame(
@@ -3028,6 +3295,79 @@ def main() -> None:
             state_col=state_col,
             phase_e=args.phase_e,
         )
+        supply_funnel = pd.DataFrame(
+            [
+                {
+                    "score_total": score_total,
+                    "after_merge": score_ctx_merged,
+                    "after_dropna_ctx": score_ctx_dropna,
+                    "events_detected": 0,
+                    "events_labeled": 0,
+                    "events_post_state_filter": 0,
+                    "events_post_meta": 0,
+                }
+            ]
+        )
+        _persist_diagnostic_tables(
+            diagnostic_report=diagnostic_report,
+            supply_funnel=supply_funnel,
+            model_dir=args.model_dir,
+            output_prefix=output_prefix,
+            output_suffix="",
+            mode_suffix=mode_suffix,
+            run_id=run_id,
+            symbol=args.symbol,
+            allow_tf=args.allow_tf,
+            score_tf=args.score_tf,
+            context_tf=args.context_tf,
+            config_path=config_path,
+            mode=effective_mode,
+            config_hash=config_hash,
+            prompt_version=prompt_version,
+            logger=logger,
+        )
+        summary_payload = {
+            "run_id": run_id,
+            "symbol": args.symbol,
+            "start": args.start,
+            "end": args.end,
+            "score_tf": args.score_tf,
+            "allow_tf": args.allow_tf,
+            "context_tf": args.context_tf,
+            "state_model_path": str(model_path),
+            "state_model_metadata_timeframe": (
+                state_model.metadata.get("timeframe") if isinstance(state_model.metadata, dict) else None
+            ),
+            "config_path": str(config_path) if config_path is not None else None,
+            "config_hash": config_hash,
+            "prompt_version": prompt_version,
+            "allow_cutoff": h1_cutoff,
+            "h1_cutoff": h1_cutoff,
+            "m5_cutoff": score_cutoff,
+            "score_cutoff": score_cutoff,
+            "k_bars": args.k_bars,
+            "reward_r": args.reward_r,
+            "sl_mult": args.sl_mult,
+            "r_thr": args.r_thr,
+            "tie_break": args.tie_break,
+            "meta_policy": {
+                "enabled": args.meta_policy == "on",
+                "meta_margin_min": args.meta_margin_min,
+                "meta_margin_max": args.meta_margin_max,
+            },
+            "phase_e": args.phase_e,
+            "verdict": "TELEMETRY_ONLY" if args.phase_e else "NO_EVENTS_DETECTED",
+            "event_counts": event_counts,
+            "context_columns": {
+                "state_col": state_col,
+                "margin_col": margin_col,
+            },
+            "context_nan_pct": context_nan_pct,
+        }
+        summary_path = args.model_dir / f"summary_{output_prefix}_event_scorer.json"
+        with summary_path.open("w", encoding="utf-8") as handle:
+            json.dump(summary_payload, handle, indent=2, default=str)
+        logger.info("summary_out=%s", summary_path)
         if research_mode:
             _print_research_summary_block(
                 diagnostic_report.get("session_conditional_edge", pd.DataFrame()),
@@ -3139,6 +3479,12 @@ def main() -> None:
             research_variants=variants_by_k.get(int(k_bars), []),
             baseline_thresholds=baseline_thresholds,
             baseline_thresholds_source=baseline_thresholds_source,
+            config_hash=config_hash,
+            prompt_version=prompt_version,
+            state_model_path=model_path,
+            state_model_metadata=state_model.metadata,
+            context_nan_pct=context_nan_pct,
+            event_counts=event_counts,
         )
         if research_enabled and exploration_enabled and variant_results is not None:
             variant_report, family_report = variant_results
@@ -3157,6 +3503,7 @@ def main() -> None:
             symbol=args.symbol,
             allow_tf=args.allow_tf,
             score_tf=args.score_tf,
+            context_tf=args.context_tf,
             run_id=run_id,
             config_path=config_path,
             grid_results=combined_grid,
@@ -3170,6 +3517,7 @@ def main() -> None:
             mode_suffix=mode_suffix,
             research_mode=research_mode,
             mode=effective_mode,
+            phase_e=args.phase_e,
         )
     return
 
