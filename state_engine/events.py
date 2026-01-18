@@ -350,6 +350,11 @@ class EventExtractor:
         events_df = events_df.sort_index()
         events_df["event_id"] = range(1, len(events_df) + 1)
         events_df["ts"] = events_df.index
+        self.logger.info(
+            "Event context columns selected: count=%s cols=%s",
+            len(context_cols),
+            context_cols,
+        )
         if vwap_metadata:
             events_df.attrs.update(vwap_metadata)
         return events_df

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,7 @@ class FeatureBuilder:
         self.micro_window = micro_window
         self.context_tf = str(context_tf).upper()
         self.context_prefix = context_prefix
+        self.logger = logging.getLogger(__name__)
 
     def _resolve_context_columns(self, df_m5_ctx: pd.DataFrame) -> tuple[str, str]:
         if self.context_prefix:
@@ -56,7 +58,36 @@ class FeatureBuilder:
             return state_col, margin_col
         if "state_hat_ctx" in df_m5_ctx.columns and "margin_ctx" in df_m5_ctx.columns:
             return "state_hat_ctx", "margin_ctx"
-        return state_col, margin_col
+        relevant_cols = [
+            col
+            for col in df_m5_ctx.columns
+            if col.startswith("state_hat_") or col.startswith("margin_") or col.startswith("ALLOW_")
+        ]
+        expected = [
+            state_col,
+            margin_col,
+            "state_hat_ctx",
+            "margin_ctx",
+        ]
+        raise ValueError(
+            "Missing context columns for feature building. "
+            f"Expected one of: {expected}. "
+            f"Available relevant columns: {relevant_cols}"
+        )
+
+    def validate_context_metadata(self, metadata: dict[str, Any] | None) -> None:
+        if not isinstance(metadata, dict):
+            return
+        meta_tf = metadata.get("context_tf") or metadata.get("allow_tf")
+        if meta_tf is None:
+            return
+        meta_tf_norm = str(meta_tf).upper()
+        if meta_tf_norm != self.context_tf:
+            self.logger.warning(
+                "Context TF mismatch: FeatureBuilder=%s scorer_metadata=%s",
+                self.context_tf,
+                meta_tf_norm,
+            )
 
     def build(self, df_m5_ctx: pd.DataFrame) -> pd.DataFrame:
         state_col, margin_col = self._resolve_context_columns(df_m5_ctx)
