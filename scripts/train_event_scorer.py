@@ -2614,10 +2614,11 @@ def _run_training_for_k(
     events_all["state_label"] = state_label
     events_all["margin_bin"] = margin_bin_label
     if args.phase_e:
-        if "allow_id" not in events_all.columns:
-            events_all["allow_id"] = events_all["family_id"].map(required_allow_by_family)
-        else:
-            events_all["allow_id"] = events_all["allow_id"].astype(str)
+        events_all = _force_phase_e_allow_identity(
+            events_all,
+            required_allow_by_family=required_allow_by_family,
+            logger=logger,
+        )
     else:
         events_all["allow_id"] = _build_allow_id(events_all, allow_cols)
     events_all["regime_id"] = (
