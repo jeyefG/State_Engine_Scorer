@@ -92,6 +92,11 @@ def parse_args() -> argparse.Namespace:
         help="Activar meta policy (gating superior) para regímenes operables",
     )
     parser.add_argument(
+        "--force-meta-policy",
+        action="store_true",
+        help="Forzar meta policy incluso en research (solo si meta_policy=on).",
+    )
+    parser.add_argument(
         "--include-transition",
         default="on",
         choices=["on", "off"],
@@ -171,6 +176,7 @@ def _default_symbol_config(args: argparse.Namespace) -> dict:
                     "trend_context_D1": False,
                     "vol_context": False,
                 },
+                "meta_policy_enabled": False,
                 "k_bars_grid": [args.k_bars],
                 "exploration": {
                     "enabled": False,
@@ -215,7 +221,15 @@ def _resolve_research_config(config: dict, mode: str) -> dict:
     if isinstance(event_cfg.get("modes"), dict):
         mode_cfg = event_cfg.get("modes", {}).get(mode, {})
     if isinstance(mode_cfg, dict):
-        for key in ("enabled", "features", "diagnostics", "k_bars_grid", "k_bars_grid_by_tf", "exploration"):
+        for key in (
+            "enabled",
+            "features",
+            "diagnostics",
+            "k_bars_grid",
+            "k_bars_grid_by_tf",
+            "exploration",
+            "meta_policy_enabled",
+        ):
             if key in mode_cfg:
                 research_cfg[key] = mode_cfg.get(key)
     enabled = bool(research_cfg.get("enabled", False))
@@ -230,6 +244,7 @@ def _resolve_research_config(config: dict, mode: str) -> dict:
         "k_bars_grid_by_tf": research_cfg.get("k_bars_grid_by_tf"),
         "d1_anchor_hour": research_cfg.get("d1_anchor_hour", 0),
         "exploration": research_cfg.get("exploration", {}) if isinstance(research_cfg.get("exploration"), dict) else {},
+        "meta_policy_enabled": bool(research_cfg.get("meta_policy_enabled", False)),
     }
 
 
@@ -258,13 +273,44 @@ def build_context(
     outputs = state_model.predict_outputs(features)
     allows = gating.apply(outputs, features=full_features)
     allow_context_frame = allows.copy()
-    feature_cols = [col for col in ["BreakMag", "ReentryCount"] if col in full_features.columns]
+    feature_cols = [
+        col
+        for col in [
+            "BreakMag",
+            "ReentryCount",
+            "session_bucket",
+            "pf_session_bucket",
+            "session",
+            "state_age",
+            "ctx_state_age",
+            "dist_vwap_atr",
+            "dist_vwap_atr_abs",
+            "ctx_dist_vwap_atr",
+        ]
+        if col in full_features.columns
+    ]
     if feature_cols:
         allow_context_frame = allow_context_frame.join(
             full_features[feature_cols].reindex(allow_context_frame.index)
         )
+    if "session" not in allow_context_frame.columns:
+        for source in ("session_bucket", "pf_session_bucket"):
+            if source in allow_context_frame.columns:
+                allow_context_frame["session"] = allow_context_frame[source]
+                break
+    if "dist_vwap_atr" not in allow_context_frame.columns and "dist_vwap_atr_abs" in allow_context_frame.columns:
+        allow_context_frame["dist_vwap_atr"] = allow_context_frame["dist_vwap_atr_abs"]
+    if "state_age" not in allow_context_frame.columns and "ctx_state_age" in allow_context_frame.columns:
+        allow_context_frame["state_age"] = allow_context_frame["ctx_state_age"]
     allow_cols = list(allows.columns)
+    non_allow_cols = [col for col in allow_context_frame.columns if col not in allow_cols]
+    logger.info("ALLOW ctx columns available: %s", non_allow_cols)
+    pre_filter_sums = (
+        allow_context_frame[allow_cols].fillna(0).sum().astype(int).to_dict() if allow_cols else {}
+    )
     allows = apply_allow_context_filters(allow_context_frame, symbol_cfg, logger)[allow_cols]
+    post_filter_sums = allows.fillna(0).sum().astype(int).to_dict() if allow_cols else {}
+    logger.info("ALLOW sums pre_filter=%s post_filter=%s", pre_filter_sums, post_filter_sums)
     if allow_cols:
         allows = allows.fillna(0).astype(int)
     ctx_cols = [col for col in outputs.columns if col.startswith("ctx_")]
@@ -864,6 +910,25 @@ def _meta_policy_mask(
     )
     margin_ok = events_df[margin_col].between(margin_min, margin_max, inclusive="both")
     return allow_active & margin_ok
+
+
+def _resolve_meta_policy_effective(
+    args: argparse.Namespace,
+    *,
+    research_enabled: bool,
+    research_cfg: dict,
+) -> tuple[bool, str | None]:
+    meta_policy_on = args.meta_policy == "on"
+    reason = None
+    if meta_policy_on and args.phase_e:
+        meta_policy_on = False
+        reason = "phase_e"
+    if meta_policy_on and research_enabled:
+        meta_policy_enabled = bool(research_cfg.get("meta_policy_enabled", False))
+        if not (meta_policy_enabled or args.force_meta_policy):
+            meta_policy_on = False
+            reason = "research_disabled"
+    return meta_policy_on, reason
 
 
 def _coverage_table(
@@ -2048,6 +2113,11 @@ def _run_training_for_k(
 ) -> tuple[pd.DataFrame, pd.DataFrame | None] | None:
     logger = logging.getLogger("event_scorer")
     research_enabled = research_mode and bool(research_cfg.get("enabled", False))
+    meta_policy_effective, meta_policy_reason = _resolve_meta_policy_effective(
+        args,
+        research_enabled=research_enabled,
+        research_cfg=research_cfg,
+    )
     logger.debug(
         "Train config | symbol=%s start=%s end=%s k_bars=%s reward_r=%s sl_mult=%s r_thr=%s meta_policy=%s include_transition=%s",
         args.symbol,
@@ -2062,7 +2132,6 @@ def _run_training_for_k(
     )
 
     def _base_summary_payload(verdict: str) -> dict[str, object]:
-        meta_policy_effective = (args.meta_policy == "on") and (not args.phase_e)
         return {
             "run_id": run_id,
             "symbol": args.symbol,
@@ -2361,10 +2430,11 @@ def _run_training_for_k(
         {k: round(v, 4) for k, v in vwap_quantiles.items()} if vwap_quantiles else {},
     )
 
-    meta_policy_on = args.meta_policy == "on"
-    if args.phase_e and meta_policy_on:
+    meta_policy_on = meta_policy_effective
+    if meta_policy_reason == "phase_e":
         logger.info("phase_e=ON -> meta_policy disabled (telemetry only)")
-        meta_policy_on = False
+    elif meta_policy_reason == "research_disabled":
+        logger.info("research=ON -> meta_policy disabled (telemetry only)")
     allow_active_series = (
         events_state_filtered[allow_cols].fillna(0).sum(axis=1) > 0
         if allow_cols
@@ -2378,12 +2448,6 @@ def _run_training_for_k(
         args.meta_margin_max,
         inclusive="both",
     )
-    logger.info(
-        "INFO | META | allow_active_count=%s margin_ok_count=%s",
-        int(allow_active_series.sum()),
-        int(margin_ok_series.sum()),
-    )
-
     meta_mask = _meta_policy_mask(
         events_state_filtered,
         allow_cols,
@@ -2392,6 +2456,15 @@ def _run_training_for_k(
         margin_col=args.context_margin_col,
     )
     events_meta = events_state_filtered.loc[meta_mask].copy()
+
+    meta_keep_count = int(meta_mask.sum()) if len(meta_mask) else 0
+    logger.info(
+        "INFO | META | meta_policy=%s allow_active_count=%s margin_ok_count=%s meta_keep_count=%s",
+        "ON" if meta_policy_on else "OFF",
+        int(allow_active_series.sum()),
+        int(margin_ok_series.sum()),
+        meta_keep_count,
+    )
 
     if meta_policy_on and events_meta.empty:
         logger.warning("Meta policy filtered all events; continuing with fallback diagnostics.")
@@ -3224,7 +3297,7 @@ def _run_training_for_k(
         "meta_policy": args.meta_policy,
         "meta_margin_min": args.meta_margin_min,
         "meta_margin_max": args.meta_margin_max,
-        "meta_policy_effective": (args.meta_policy == "on") and (not args.phase_e),
+        "meta_policy_effective": meta_policy_effective,
         "config_hash": config_hash,
         "prompt_version": prompt_version,
         "decision_thresholds": {
@@ -3437,7 +3510,7 @@ def _run_training_for_k(
             "meta_margin_min": args.meta_margin_min,
             "meta_margin_max": args.meta_margin_max,
         },
-        "meta_policy_effective": (args.meta_policy == "on") and (not args.phase_e),
+        "meta_policy_effective": meta_policy_effective,
         "phase_e": args.phase_e,
         "verdict": "TELEMETRY_ONLY" if args.phase_e else "SCORER_READY",
         "score_shape_verdict": "TELEMETRY_ONLY" if args.phase_e else "DIAGNOSTIC_ONLY",
