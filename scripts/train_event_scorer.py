@@ -298,42 +298,29 @@ def build_context(
         symbol=symbol,
         timeframe=context_tf,
     )
-    feature_cols = [
-        col
-        for col in [
-            "BreakMag",
-            "ReentryCount",
-            "session_bucket",
-            "pf_session_bucket",
-            "session",
-            "state_age",
-            "ctx_state_age",
-            "dist_vwap_atr",
-            "dist_vwap_atr_abs",
-            "ctx_dist_vwap_atr",
-        ]
-        if col in full_features.columns
-    ]
+    feature_cols = [col for col in ["BreakMag", "ReentryCount"] if col in full_features.columns]
     if feature_cols:
         allow_context_frame = allow_context_frame.join(
             full_features[feature_cols].reindex(allow_context_frame.index)
         )
     if not ctx_features.empty:
-        allow_context_frame = allow_context_frame.join(ctx_features.reindex(allow_context_frame.index))
-    if "session" not in allow_context_frame.columns:
-        for source in ("ctx_session_bucket", "session_bucket", "pf_session_bucket"):
-            if source in allow_context_frame.columns:
-                allow_context_frame["session"] = allow_context_frame[source]
-                break
-    if "dist_vwap_atr" not in allow_context_frame.columns and "dist_vwap_atr_abs" in allow_context_frame.columns:
-        allow_context_frame["dist_vwap_atr"] = allow_context_frame["dist_vwap_atr_abs"]
+        allow_context_frame = allow_context_frame.join(
+            ctx_features.reindex(allow_context_frame.index)
+        )
+    logger.debug(
+        "CTX features joined | shape=%s columns=%s",
+        ctx_features.shape,
+        list(ctx_features.columns),
+    )
+    if "session" not in allow_context_frame.columns and "ctx_session_bucket" in allow_context_frame.columns:
+        allow_context_frame["session"] = allow_context_frame["ctx_session_bucket"]
+    if "state_age" not in allow_context_frame.columns and "ctx_state_age" in allow_context_frame.columns:
+        allow_context_frame["state_age"] = allow_context_frame["ctx_state_age"]
     if "dist_vwap_atr" not in allow_context_frame.columns:
         for source in ("ctx_dist_vwap_atr", "ctx_dist_vwap_atr_abs"):
             if source in allow_context_frame.columns:
                 allow_context_frame["dist_vwap_atr"] = allow_context_frame[source]
                 break
-    if "state_age" not in allow_context_frame.columns and "ctx_state_age" in allow_context_frame.columns:
-        allow_context_frame["state_age"] = allow_context_frame["ctx_state_age"]
     allow_cols = list(allows.columns)
     non_allow_cols = [col for col in allow_context_frame.columns if col not in allow_cols]
     logger.info("ALLOW ctx columns available: %s", non_allow_cols)
@@ -343,9 +330,22 @@ def build_context(
         "state_age" in allow_context_frame.columns,
         "dist_vwap_atr" in allow_context_frame.columns,
     )
+    nan_pct = {}
+    for col in ("session", "state_age", "dist_vwap_atr"):
+        if col in allow_context_frame.columns:
+            nan_pct[col] = float(allow_context_frame[col].isna().mean() * 100.0)
+        else:
+            nan_pct[col] = None
+    logger.info(
+        "ALLOW ctx NaN pct | session=%s state_age=%s dist_vwap_atr=%s",
+        "missing" if nan_pct["session"] is None else f"{nan_pct['session']:.2f}",
+        "missing" if nan_pct["state_age"] is None else f"{nan_pct['state_age']:.2f}",
+        "missing" if nan_pct["dist_vwap_atr"] is None else f"{nan_pct['dist_vwap_atr']:.2f}",
+    )
     allow_cfg = symbol_cfg.get("allow_context_filters") if isinstance(symbol_cfg, dict) else None
     filtered_symbol_cfg = symbol_cfg
     missing_by_rule: dict[str, list[str]] = {}
+    available_cols = sorted(allow_context_frame.columns)
     if isinstance(allow_cfg, dict):
         for allow_rule, rule_cfg in allow_cfg.items():
             if allow_rule == "ALLOW_transition_failure":
@@ -358,13 +358,19 @@ def build_context(
                 missing_by_rule[allow_rule] = missing
     if missing_by_rule:
         if phase_e or mode == "research":
+            missing_details = "; ".join(
+                f"{allow_rule} missing={missing_cols}"
+                for allow_rule, missing_cols in sorted(missing_by_rule.items())
+            )
             raise ValueError(
-                f"ALLOW context filters enabled but missing columns: {missing_by_rule}"
+                "ALLOW context filters enabled but missing columns. "
+                f"{missing_details}. Available={available_cols}"
             )
         logger.warning(
-            "ALLOW context filters missing columns (auto-disable in mode=%s): %s",
+            "ALLOW context filters missing columns (auto-disable in mode=%s): %s | available=%s",
             mode,
             missing_by_rule,
+            available_cols,
         )
         if isinstance(symbol_cfg, dict) and isinstance(allow_cfg, dict):
             filtered_symbol_cfg = dict(symbol_cfg)
@@ -374,6 +380,10 @@ def build_context(
                 if isinstance(rule_cfg, dict):
                     allow_ctx[allow_rule] = {**rule_cfg, "enabled": False}
             filtered_symbol_cfg["allow_context_filters"] = allow_ctx
+            logger.info(
+                "ALLOW context filters auto-disabled for rules=%s",
+                sorted(missing_by_rule.keys()),
+            )
     pre_filter_sums = (
         allow_context_frame[allow_cols].fillna(0).sum().astype(int).to_dict() if allow_cols else {}
     )
