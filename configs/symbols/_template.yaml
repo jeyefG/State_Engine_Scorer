@@ -1,7 +1,8 @@
-symbol: "XAUUSD.mg"
 event_scorer:
   score_tf: "M5"
   allow_tf: "H1"
+  # context_tf overrides the State Engine metadata timeframe when needed.
+  # context_tf: "H2"
   train_ratio: 0.8
   k_bars: 24
   k_bars_by_tf:
@@ -48,11 +49,32 @@ event_scorer:
     k_bars_grid_by_tf:
       M5: []
       M15: []
+    exploration:
+      enabled: false
+      kind: "thresholds_only"
+      seed: 7
+      max_variants: 25
+      decision_thresholds_grid:
+        n_min: [200]
+        winrate_min: [0.52]
+        r_mean_min: [0.02]
+        p10_min: [-0.2]
     diagnostics:
       max_family_concentration: 0.6
       min_temporal_dispersion: 0.3
       max_score_tail_slope: 2.5
       min_calib_samples: 200
+
+allow_context_filters:
+  # Example ALLOW filters (optional). Each ALLOW_* block mirrors the gating filters in code.
+  ALLOW_transition_failure:
+    enabled: false
+    require_all: true
+    sessions_in: ["LONDON", "NY"]
+    state_age_max: 5
+    dist_vwap_atr_max: 1.5
+    breakmag_min: 0.25
+    reentry_min: 1.0
 
 diagnostic_tables:
   n_min: 30
