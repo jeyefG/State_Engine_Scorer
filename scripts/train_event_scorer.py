@@ -360,6 +360,49 @@ def _apply_event_allow_gates(
     return events.loc[keep_mask].drop(columns=["required_allow"])
 
 
+def _force_phase_e_allow_identity(
+    events_df: pd.DataFrame,
+    *,
+    required_allow_by_family: dict[str, str],
+    logger: logging.Logger,
+) -> pd.DataFrame:
+    if events_df.empty:
+        logger.info("Phase E allow identity forced: no events to process.")
+        return events_df
+    events = events_df.copy()
+    required_allow = events["family_id"].map(required_allow_by_family)
+    if required_allow.isna().any():
+        missing = sorted(set(events.loc[required_allow.isna(), "family_id"]))
+        raise ValueError(f"Phase E allow identity: missing required_allow mapping for families={missing}")
+    events["required_allow"] = required_allow
+    events["allow_id"] = required_allow
+    allowed_set = set(required_allow_by_family.values())
+    invalid_allow = sorted(set(events["allow_id"]) - allowed_set)
+    if invalid_allow:
+        raise ValueError(f"Phase E allow identity: unexpected allow_id values={invalid_allow}")
+    if events["allow_id"].astype(str).str.contains(",", na=False).any():
+        raise ValueError("Phase E allow identity: allow_id contains comma-separated combos.")
+    if (events["allow_id"] == "ALLOW_none").any():
+        raise ValueError("Phase E allow identity: ALLOW_none is not permitted.")
+    allow_cols = [col for col in events.columns if col.startswith("ALLOW_")]
+    if allow_cols:
+        multi_allow_count = int((events[allow_cols].fillna(0).sum(axis=1) >= 2).sum())
+        logger.info(
+            "Phase E allow identity forced: allow_id == required_allow | events=%s multi_allow_events=%s allow_cols=%s",
+            len(events),
+            multi_allow_count,
+            allow_cols,
+        )
+    else:
+        logger.info(
+            "Phase E allow identity forced: allow_id == required_allow | events=%s no_allow_columns",
+            len(events),
+        )
+    allow_counts = events["allow_id"].value_counts().to_dict()
+    logger.info("Phase E allow identity summary: %s", allow_counts)
+    return events
+
+
 def build_context(
     ohlcv_ctx: pd.DataFrame,
     state_model: StateEngineModel,
@@ -2570,7 +2613,13 @@ def _run_training_for_k(
     state_label = events_all[args.context_state_col].map(_state_label)
     events_all["state_label"] = state_label
     events_all["margin_bin"] = margin_bin_label
-    events_all["allow_id"] = _build_allow_id(events_all, allow_cols)
+    if args.phase_e:
+        if "allow_id" not in events_all.columns:
+            events_all["allow_id"] = events_all["family_id"].map(required_allow_by_family)
+        else:
+            events_all["allow_id"] = events_all["allow_id"].astype(str)
+    else:
+        events_all["allow_id"] = _build_allow_id(events_all, allow_cols)
     events_all["regime_id"] = (
         state_label.astype(str)
         + "|"
@@ -4092,6 +4141,15 @@ def main() -> None:
         active_allows=active_allows,
         logger=logger,
     )
+    if args.phase_e:
+        detected_events = _force_phase_e_allow_identity(
+            detected_events,
+            required_allow_by_family=required_allow_by_family,
+            logger=logger,
+        )
+        if not detected_events.empty:
+            assert detected_events["allow_id"].astype(str).str.contains(",", na=False).sum() == 0
+            assert (detected_events["allow_id"] == "ALLOW_none").sum() == 0
     vwap_valid_pct = detected_events.attrs.get("vwap_valid_pct")
     vwap_invalid_reason = detected_events.attrs.get("vwap_invalid_reason")
     vwap_invalid_bars = detected_events.attrs.get("vwap_invalid_bars")
